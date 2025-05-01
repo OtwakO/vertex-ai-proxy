@@ -1,0 +1,17 @@
+# Version gemini-rotating-proxy-hajimi v0.2.2
+
+services:
+    vertex-ai-proxy:
+        build:
+            context: ./
+            dockerfile: Dockerfile
+        container_name: "vertex-ai-proxy"
+        ports:
+            - ":7860"
+        env_file: ".env"
+        restart: always
+
+# networks:
+#     default:
+#         external: true
+#         name: caddy-network
