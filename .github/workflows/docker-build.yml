@@ -13,6 +13,9 @@ jobs:
       packages: write
 
     steps:
+    - name: lowercase repository name
+      run: echo "IMAGE_NAME=${GITHUB_REPOSITORY@L}" >> ${GITHUB_ENV}
+
     - name: Checkout repository
       uses: actions/checkout@v4
 
@@ -36,7 +39,7 @@ jobs:
         context: .
         push: true
         tags: |
-          ghcr.io/${{ github.repository }}:latest
-          ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+          ghcr.io/${{ env.IMAGE_NAME }}:latest
+          ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
