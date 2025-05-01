@@ -10,9 +10,9 @@ import app.config.settings as settings
 from app.models import ChatCompletionRequest
 from app.utils import (
     handle_gemini_error,
-    log,
     openAI_nonstream_response,
 )
+from app.utils import vertex_log as log
 from app.vertex.vertex import OpenAIMessage, OpenAIRequest
 from app.vertex.vertex import chat_completions as vertex_chat_completions_impl
 

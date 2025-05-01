@@ -1,25 +1,26 @@
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
-from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, ConfigDict, Field
-from typing import List, Dict, Any, Optional, Union, Literal
-import base64
-import re
-import json
-import time
 import asyncio  # Add this import
-import os
+import base64
 import glob
+import json
+import os
 import random
+import re
+import time
 import urllib.parse
-from google.oauth2 import service_account
-import app.vertex.config as config
-from fastapi import APIRouter
-from google.genai import types
-from app.utils.logging import vertex_log as log
+from typing import Any, Dict, List, Literal, Optional, Union
+
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader
 from google import genai
+from google.genai import types
+from google.oauth2 import service_account
+from pydantic import BaseModel, ConfigDict, Field
+
 import app.config.settings as settings
+import app.vertex.config as config
+from app.utils.logging import vertex_log as log
 
 client = None
 router = APIRouter()
@@ -545,10 +546,10 @@ def create_gemini_prompt(
             parts = []
 
             # 只记录结构信息
-            log(
-                "debug",
-                f"消息 {idx}: role={role}, content_type={type(message.content).__name__}",
-            )
+            # log(
+            #     "debug",
+            #     f"消息 {idx}: role={role}, content_type={type(message.content).__name__}",
+            # )
 
             if isinstance(message.content, str):
                 # 只记录是否为空
@@ -1320,7 +1321,7 @@ async def chat_completions(request: OpenAIRequest, api_key: Optional[str] = None
                                 )
                                 if not is_response_valid(response):
                                     raise ValueError(
-                                        "Invalid or empty response received"
+                                        f"Invalid or empty response received: {response}"
                                     )  # Trigger retry
 
                                 return convert_to_openai_format(response, request.model)
@@ -1466,7 +1467,7 @@ async def chat_completions(request: OpenAIRequest, api_key: Optional[str] = None
                     )
                     if not is_response_valid(response):
                         raise ValueError(
-                            "Invalid or empty response received"
+                            f"Invalid or empty response received: {response}"
                         )  # Trigger retry
 
                     openai_response = convert_to_openai_format(response, request.model)

@@ -17,6 +17,7 @@ from app.utils import (
     openAI_stream_chunk,
     protect_from_abuse,
 )
+from app.utils.logging import log, vertex_log
 from app.utils.response import openAI_from_Gemini
 from app.vertex.vertex import list_models as list_models_vertex
 
@@ -286,7 +287,7 @@ async def vertex_chat_completions(
     http_request: Request,
     _: None = Depends(custom_verify_password),
 ):
-    global current_api_key
+    # global current_api_key
 
     # --- Vertex 聊天完成处理 ---
 
@@ -312,7 +313,7 @@ async def vertex_chat_completions(
 
     # 记录 Vertex 请求信息
     log_request_type = "stream" if request.stream else "non-stream"
-    log(
+    vertex_log(
         "info",
         f"Vertex 请求缓存键: {cache_key[:8]}...",
         extra={"request_type": log_request_type, "model": request.model},
@@ -323,7 +324,7 @@ async def vertex_chat_completions(
 
     # 缓存命中 (非流式)
     if cache_hit and not request.stream:
-        log(
+        vertex_log(
             "info",
             f"Vertex 缓存命中: {cache_key[:8]}...",
             extra={"request_type": "non-stream", "model": request.model},
@@ -332,7 +333,7 @@ async def vertex_chat_completions(
 
     # 缓存命中 (流式)
     if cache_hit and request.stream:
-        log(
+        vertex_log(
             "info",
             f"Vertex 缓存命中: {cache_key[:8]}...",
             extra={"request_type": "stream", "model": request.model},
@@ -350,7 +351,7 @@ async def vertex_chat_completions(
     pool_key = f"vertex_cache:{cache_key}"  # 使用 'vertex_cache:' 前缀区分
     active_task = active_requests_manager.get(pool_key)
     if active_task and not active_task.done():
-        log(
+        vertex_log(
             "info",
             f"发现相同 Vertex 请求的进行中任务: {pool_key}",
             extra={"request_type": log_request_type, "model": request.model},
@@ -365,7 +366,7 @@ async def vertex_chat_completions(
         except (asyncio.TimeoutError, asyncio.CancelledError) as e:
             # 等待任务超时或被取消
             error_type = "超时" if isinstance(e, asyncio.TimeoutError) else "被取消"
-            log(
+            vertex_log(
                 "warning",
                 f"等待已有 Vertex 任务{error_type}: {pool_key}",
                 extra={"request_type": log_request_type, "model": request.model},
@@ -373,7 +374,7 @@ async def vertex_chat_completions(
             # 从活跃请求池移除已结束的任务
             if active_task.done() or active_task.cancelled():
                 active_requests_manager.remove(pool_key)
-                log(
+                vertex_log(
                     "info",
                     f"已从活跃请求池移除{error_type} Vertex 任务: {pool_key}",
                     extra={"request_type": log_request_type},
@@ -417,7 +418,7 @@ async def vertex_chat_completions(
     except Exception as e:
         # 处理任务失败，从活跃请求池移除
         active_requests_manager.remove(pool_key)
-        log(
+        vertex_log(
             "error",
             f"Vertex 请求处理时发生错误: {str(e)}",
             extra={
@@ -430,7 +431,7 @@ async def vertex_chat_completions(
         # 任务失败后，再次检查缓存 (可能由其他并发任务写入)
         cached_response, cache_hit = response_cache_manager.get_and_remove(cache_key)
         if cache_hit:
-            log(
+            vertex_log(
                 "info",
                 f"Vertex 任务失败但找到缓存，使用缓存结果: {cache_key[:8]}...",
                 extra={"request_type": log_request_type, "model": request.model},

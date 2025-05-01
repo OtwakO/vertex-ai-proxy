@@ -2,3 +2,4 @@
 **/.env
 **/.venv/
 **/.vscode/
+**/.ruff_cache/

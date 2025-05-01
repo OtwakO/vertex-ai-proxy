@@ -1,36 +1,41 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+import asyncio
+import os
+import pathlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+import app.config.settings as settings
+from app.api import dashboard_router, init_dashboard_router, init_router, router
+from app.config.persistence import load_settings, save_settings
+from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 from app.models import ErrorResponse
 from app.services import GeminiClient
 from app.utils import (
-    APIKeyManager,
-    test_api_key,
-    format_log_message,
-    log_manager,
-    ResponseCacheManager,
     ActiveRequestsManager,
-    clean_expired_stats,
-    update_api_call_stats,
+    APIKeyManager,
+    ResponseCacheManager,
     check_version,
-    schedule_cache_cleanup,
+    clean_expired_stats,
+    format_log_message,
     handle_exception,
     log,
+    log_manager,
+    schedule_cache_cleanup,
+    test_api_key,
+    update_api_call_stats,
 )
-from app.config.persistence import save_settings, load_settings
-from app.api import router, init_router, dashboard_router, init_dashboard_router
-from app.vertex.vertex import router as vertex_router
 from app.vertex.vertex import init_vertex_ai
-import app.config.settings as settings
-from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
-import asyncio
-from datetime import datetime, timedelta
-import sys
-import pathlib
-import threading
-from concurrent.futures import ThreadPoolExecutor
-import os
+from app.vertex.vertex import router as vertex_router
 
 # 设置模板目录
 BASE_DIR = pathlib.Path(__file__).parent
