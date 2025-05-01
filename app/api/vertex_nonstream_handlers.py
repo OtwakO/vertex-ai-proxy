@@ -8,11 +8,9 @@ from fastapi.responses import JSONResponse
 
 import app.config.settings as settings
 from app.models import ChatCompletionRequest
-from app.utils import (
-    handle_gemini_error,
-    openAI_nonstream_response,
-)
+from app.utils import handle_gemini_error
 from app.utils import vertex_log as log
+from app.utils.response import openAI_nonstream_response
 from app.vertex.vertex import OpenAIMessage, OpenAIRequest
 from app.vertex.vertex import chat_completions as vertex_chat_completions_impl
 
@@ -91,12 +89,12 @@ async def _execute_single_vertex_call(
             )
             return "success", response_obj, None
         else:
-            log("warning", f"Vertex API 调用成功但返回空响应", extra=log_extra)
+            log("warning", "Vertex API 调用成功但返回空响应", extra=log_extra)
             return "empty", None, None
 
     except asyncio.CancelledError:
         # 处理任务被取消的情况
-        log("warning", f"Vertex API 调用任务被取消", extra=log_extra)
+        log("warning", "Vertex API 调用任务被取消", extra=log_extra)
         return "cancelled", None, asyncio.CancelledError()
 
     except Exception as e:
@@ -223,7 +221,7 @@ async def _await_and_cache_shielded(
             else:
                 timed_out_tasks += 1
                 results.append(
-                    asyncio.TimeoutError(f"Task did not complete within gather timeout")
+                    asyncio.TimeoutError("Task did not complete within gather timeout")
                 )
     except Exception as e:
         # 处理 gather 发生的其他异常
@@ -239,7 +237,7 @@ async def _await_and_cache_shielded(
             else:
                 timed_out_tasks += 1
                 results.append(
-                    RuntimeError(f"Task did not complete due to gather error")
+                    RuntimeError("Task did not complete due to gather error")
                 )
 
     # 统计并记录后台任务的最终结果
@@ -253,7 +251,7 @@ async def _await_and_cache_shielded(
 
     for i, result in enumerate(results):
         if i >= len(shielded_tasks):
-            log("error", f"后台缓存任务: 结果数量与任务数量不匹配", extra=log_extra)
+            log("error", "后台缓存任务: 结果数量与任务数量不匹配", extra=log_extra)
             counts["error"] += 1
             continue
 
@@ -307,7 +305,7 @@ async def process_vertex_request(
     # 1. 优先检查缓存
     cached_response, cache_hit = response_cache_manager.get_and_remove(cache_key)
     if cache_hit:
-        log("info", f"Vertex 请求命中缓存", extra=log_extra)
+        log("info", "Vertex 请求命中缓存", extra=log_extra)
         return openAI_nonstream_response(cached_response)
 
     # 2. 检查是否有相同请求正在处理 (防止重复调用)
@@ -315,14 +313,14 @@ async def process_vertex_request(
     orchestrator_pool_key = f"vertex_orchestrator:{cache_key}"
     existing_future = active_requests_manager.get(orchestrator_pool_key)
     if isinstance(existing_future, asyncio.Future) and not existing_future.done():
-        log("info", f"发现相同请求进行中，等待其 Future", extra=log_extra)
+        log("info", "发现相同请求进行中，等待其 Future", extra=log_extra)
         try:
             # 等待现有任务的 Future 完成
             first_result = await asyncio.wait_for(
                 existing_future, timeout=settings.REQUEST_TIMEOUT
             )
             if isinstance(first_result, VertexCachedResponse):
-                log("info", f"使用来自现有任务 Future 的结果", extra=log_extra)
+                log("info", "使用来自现有任务 Future 的结果", extra=log_extra)
                 # 理论上，现有任务应该已将结果存入缓存，再次尝试获取
                 cached_response_again, cache_hit_again = (
                     response_cache_manager.get_and_remove(cache_key)
@@ -344,16 +342,16 @@ async def process_vertex_request(
                     extra=log_extra,
                 )
         except asyncio.TimeoutError:
-            log("warning", f"等待现有任务 Future 超时", extra=log_extra)
+            log("warning", "等待现有任务 Future 超时", extra=log_extra)
         except asyncio.CancelledError:
-            log("warning", f"等待现有任务 Future 时被取消", extra=log_extra)
+            log("warning", "等待现有任务 Future 时被取消", extra=log_extra)
             raise
         except Exception as e:
             log("error", f"等待现有任务 Future 时发生错误: {e}", extra=log_extra)
         # 若等待失败 (超时/错误)，则继续创建新任务
 
     # 3. 创建新的非流式编排器任务
-    log("info", f"Vertex 请求缓存未命中，创建新任务组", extra=log_extra)
+    log("info", "Vertex 请求缓存未命中，创建新任务组", extra=log_extra)
     # 创建一个 Future，用于当前请求等待第一个成功结果
     first_result_future = asyncio.Future()
     # 将 Future 注册到管理器，以便后续相同请求可以等待它
@@ -508,7 +506,7 @@ async def process_vertex_request(
                                 else:
                                     log(
                                         "warning",
-                                        f"非流式编排器: Future 已完成，无法设置首个成功结果",
+                                        "非流式编排器: Future 已完成，无法设置首个成功结果",
                                         extra=log_extra,
                                     )
 
@@ -584,7 +582,7 @@ async def process_vertex_request(
                             # 处理 API 任务在等待过程中被取消的情况
                             log(
                                 "warning",
-                                f"非流式编排器: API 任务在处理器中被取消",
+                                "非流式编排器: API 任务在处理器中被取消",
                                 extra=log_extra,
                             )
                             if task in all_tasks_to_wait:
@@ -751,4 +749,4 @@ async def process_vertex_request(
         if isinstance(e, HTTPException):
             raise e  # 重新抛出已知的 HTTP 异常
         else:
-            raise HTTPException(status_code=500, detail=f"处理请求时发生内部错误")
+            raise HTTPException(status_code=500, detail="处理请求时发生内部错误")

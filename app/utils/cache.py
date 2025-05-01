@@ -1,7 +1,7 @@
 import time
 import hashlib
 import json
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, Tuple
 import logging
 from collections import deque
 from app.utils.logging import log

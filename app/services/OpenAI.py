@@ -1,15 +1,11 @@
-import requests
 import json
 import os
-import asyncio
-from app.models import ChatCompletionRequest, Message
+from app.models import ChatCompletionRequest
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional
 import httpx
-import logging
 import secrets
 import string
-from app.utils import format_log_message
 import app.config.settings as settings
 
 from app.utils.logging import log
@@ -89,7 +85,7 @@ class OpenAIClient:
         log("INFO", "流式请求开始", extra=extra_log)
 
         url = (
-            f"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         )
         headers = {
             "Content-Type": "application/json",
@@ -127,7 +123,7 @@ class OpenAIClient:
                         except Exception as e:
                             log(
                                 "ERROR",
-                                f"流式处理期间发生错误",
+                                "流式处理期间发生错误",
                                 extra={
                                     "key": self.api_key[:8],
                                     "request_type": "stream",

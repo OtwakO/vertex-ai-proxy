@@ -16,5 +16,5 @@ from app.utils.version import check_version
 from app.utils.maintenance import handle_exception, schedule_cache_cleanup
 from app.utils.rate_limiting import protect_from_abuse
 from app.utils.request import ActiveRequestsManager
-from app.utils.response import openAI_nonstream_response, openAI_stream_chunk
+from app.utils.response import openAI_stream_chunk
 from app.utils.stats import clean_expired_stats, update_api_call_stats

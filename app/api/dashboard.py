@@ -1,12 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
-import time
-import asyncio
-import random
 from app.utils import (
     log_manager,
-    ResponseCacheManager,
-    ActiveRequestsManager,
     clean_expired_stats,
 )
 import app.config.settings as settings
@@ -355,7 +350,7 @@ async def update_config(config_data: dict):
                         )
                         break
                 else:
-                    log("warning", f"没有可用的API密钥，无法刷新可用模型列表")
+                    log("warning", "没有可用的API密钥，无法刷新可用模型列表")
             except Exception as e:
                 log("warning", f"刷新可用模型列表时发生错误: {str(e)}")
 

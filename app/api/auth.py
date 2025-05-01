@@ -1,5 +1,4 @@
 from fastapi import HTTPException, Request
-import app.config.settings as settings
 
 
 # 密码验证依赖

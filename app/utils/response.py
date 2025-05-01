@@ -1,6 +1,5 @@
 import json
 import time
-from app.utils.logging import log
 
 
 def openAI_stream_chunk(

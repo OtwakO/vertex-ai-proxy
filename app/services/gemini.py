@@ -1,10 +1,9 @@
 import requests
 import json
 import os
-import asyncio
-from app.models import ChatCompletionRequest, Message
+from app.models import ChatCompletionRequest
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import httpx
 import secrets
 import string
@@ -315,7 +314,7 @@ class GeminiClient:
                         except Exception as e:
                             log(
                                 "ERROR",
-                                f"流式处理期间发生错误",
+                                "流式处理期间发生错误",
                                 extra={
                                     "key": self.api_key[:8],
                                     "request_type": "stream",
@@ -350,7 +349,7 @@ class GeminiClient:
             response.raise_for_status()
 
             return GeminiResponseWrapper(response.json())
-        except Exception as e:
+        except Exception:
             raise
 
     # OpenAI 格式请求转换为 gemini 格式请求

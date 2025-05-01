@@ -1,8 +1,7 @@
 import requests
 import logging
 import asyncio
-from fastapi import HTTPException, status
-from app.utils.logging import format_log_message
+from fastapi import HTTPException
 from app.utils.logging import log
 
 logger = logging.getLogger("my_logger")
@@ -52,7 +51,7 @@ def handle_gemini_error(error, current_api_key) -> str:
                 return error_message
 
         elif status_code == 403:
-            error_message = f"权限被拒绝"
+            error_message = "权限被拒绝"
             log(
                 "ERROR",
                 error_message,
@@ -63,7 +62,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         elif status_code == 429:
-            error_message = f"API 密钥配额已用尽或其他原因"
+            error_message = "API 密钥配额已用尽或其他原因"
             log(
                 "WARNING",
                 error_message,
@@ -74,7 +73,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         if status_code == 500:
-            error_message = f"Gemini API 内部错误"
+            error_message = "Gemini API 内部错误"
             log(
                 "WARNING",
                 error_message,
@@ -83,7 +82,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         if status_code == 503:
-            error_message = f"Gemini API 服务繁忙"
+            error_message = "Gemini API 服务繁忙"
             log(
                 "WARNING",
                 error_message,
@@ -172,7 +171,7 @@ async def handle_api_error(
             error_message = "API 密钥配额已用尽或其他原因"
             log(
                 "WARNING",
-                f"429 官方资源耗尽或其他原因",
+                "429 官方资源耗尽或其他原因",
                 extra={
                     "key": api_key[:8],
                     "status_code": status_code,

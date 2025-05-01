@@ -1,5 +1,4 @@
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from app.utils.logging import log
 from app.config.settings import stats_lock
 

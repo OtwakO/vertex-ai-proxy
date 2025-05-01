@@ -9,14 +9,13 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from google import genai
 from google.genai import types
 from google.oauth2 import service_account
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 import app.config.settings as settings
 import app.vertex.config as config
@@ -291,7 +290,7 @@ def init_vertex_ai():
             log("info", f"检查 GOOGLE_APPLICATION_CREDENTIALS 文件路径: {file_path}")
             if os.path.exists(file_path):
                 try:
-                    log("info", f"文件存在, 尝试加载凭证")
+                    log("info", "文件存在, 尝试加载凭证")
                     credentials = service_account.Credentials.from_service_account_file(
                         file_path,
                         scopes=["https://www.googleapis.com/auth/cloud-platform"],

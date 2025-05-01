@@ -7,7 +7,6 @@ import pathlib
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -25,17 +24,12 @@ from app.utils import (
     APIKeyManager,
     ResponseCacheManager,
     check_version,
-    clean_expired_stats,
-    format_log_message,
     handle_exception,
     log,
-    log_manager,
     schedule_cache_cleanup,
     test_api_key,
-    update_api_call_stats,
 )
 from app.vertex.vertex import init_vertex_ai
-from app.vertex.vertex import router as vertex_router
 
 # 设置模板目录
 BASE_DIR = pathlib.Path(__file__).parent

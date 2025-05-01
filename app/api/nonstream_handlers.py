@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import HTTPException, status, Request
+from fastapi import HTTPException, Request
 from app.models import ChatCompletionRequest
 from app.services import GeminiClient
 from app.utils import update_api_call_stats
@@ -123,7 +123,7 @@ async def process_nonstream_request(
             if not response_content or not response_content.text:
                 log(
                     "warning",
-                    f"非流式请求(取消后):返回空响应",
+                    "非流式请求(取消后):返回空响应",
                     extra={
                         "key": current_api_key[:8],
                         "request_type": request_type,
@@ -288,7 +288,7 @@ async def process_request(
                         success = True
                         log(
                             "info",
-                            f"非流式请求成功",
+                            "非流式请求成功",
                             extra={
                                 "request_type": request_type,
                                 "model": chat_request.model,
@@ -350,5 +350,5 @@ async def process_request(
 
     raise HTTPException(
         status_code=500,
-        detail=f"API key 替换失败，所有API key都已尝试，请重新配置或稍后重试",
+        detail="API key 替换失败，所有API key都已尝试，请重新配置或稍后重试",
     )

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Dict, Any
+from typing import Dict
 from app.utils.logging import log
 
 

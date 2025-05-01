@@ -1,12 +1,10 @@
 import asyncio
-import json
-import time
 import random
 
 # from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from app.models import ChatCompletionRequest
-from app.services import GeminiClient, OpenAIClient
+from app.services import GeminiClient
 from app.utils import (
     handle_gemini_error,
     update_api_call_stats,
@@ -155,7 +153,7 @@ async def process_stream_request(
                                 success = True
                                 log(
                                     "info",
-                                    f"假流式请求成功",
+                                    "假流式请求成功",
                                     extra={
                                         "request_type": "fake-stream",
                                         "model": chat_request.model,
@@ -365,7 +363,7 @@ async def process_stream_request(
 
             log(
                 "info",
-                f"假流式成功获取响应，进行缓存",
+                "假流式成功获取响应，进行缓存",
                 extra={
                     "key": api_key[:8],
                     "request_type": "fake-stream",
@@ -385,7 +383,7 @@ async def process_stream_request(
             if not response_content or not response_content.text:
                 log(
                     "warning",
-                    f"请求返回空响应",
+                    "请求返回空响应",
                     extra={
                         "key": api_key[:8],
                         "request_type": "fake-stream",

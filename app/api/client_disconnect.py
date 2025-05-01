@@ -58,7 +58,7 @@ async def handle_client_disconnect(
         response_cache_manager.store(cache_key, response_content)
         log(
             "info",
-            f"请求成功完成，缓存响应",
+            "请求成功完成，缓存响应",
             extra={
                 "key": current_api_key[:8],
                 "request_type": request_type,

@@ -1,25 +1,21 @@
 import asyncio
-import json
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 import app.config.settings as settings
 from app.models import ChatCompletionRequest, ChatCompletionResponse, ModelList
-from app.models.schemas import ChatCompletionResponse, Choice, Message
+from app.models.schemas import ChatCompletionResponse
 from app.services import GeminiClient
 from app.utils import (
     generate_cache_key,
     generate_cache_key_all,
     log,
-    openAI_nonstream_response,
     openAI_stream_chunk,
     protect_from_abuse,
 )
 from app.utils.logging import log, vertex_log
-from app.utils.response import openAI_from_Gemini
-from app.vertex.vertex import list_models as list_models_vertex
+from app.utils.response import openAI_from_Gemini, openAI_nonstream_response
 
 # 导入拆分后的模块
 from .auth import verify_password
@@ -194,7 +190,7 @@ async def aistudio_chat_completions(
     if active_task and not active_task.done():
         log(
             "info",
-            f"发现相同请求的进行中任务",
+            "发现相同请求的进行中任务",
             extra={"request_type": "non-stream", "model": request.model},
         )
 
@@ -263,7 +259,7 @@ async def aistudio_chat_completions(
     try:
         response = await process_task
         return response
-    except Exception as e:
+    except Exception:
         # 如果任务失败，从活跃请求池中移除
         active_requests_manager.remove(pool_key)
 
@@ -278,7 +274,7 @@ async def aistudio_chat_completions(
             return cached_response
 
         # 发送错误信息给客户端
-        raise HTTPException(status_code=500, detail=f" hajimi 服务器内部处理时发生错误")
+        raise HTTPException(status_code=500, detail=" hajimi 服务器内部处理时发生错误")
 
 
 @router.post("/vertex/chat/completions", response_model=ChatCompletionResponse)

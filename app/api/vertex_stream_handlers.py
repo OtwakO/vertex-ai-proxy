@@ -2,7 +2,7 @@
 import asyncio
 import json
 import time  # Import time for polling timeout
-from typing import Any, AsyncGenerator, Dict, Literal, Optional, Tuple  # Added Dict
+from typing import AsyncGenerator, Optional  # Added Dict
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -270,7 +270,7 @@ async def process_vertex_stream_request(
             if cache_hit and isinstance(cached_response, VertexCachedResponse):
                 log(
                     "info",
-                    f"Vertex 假流式请求命中缓存 (类型正确，已移除)",
+                    "Vertex 假流式请求命中缓存 (类型正确，已移除)",
                     extra=log_extra,
                 )
                 try:
@@ -312,7 +312,7 @@ async def process_vertex_stream_request(
             ):
                 log(
                     "info",
-                    f"发现相同请求进行中，等待其 Future (用于获取首个结果)",
+                    "发现相同请求进行中，等待其 Future (用于获取首个结果)",
                     extra=log_extra,
                 )
                 keep_alive_task = None
@@ -351,7 +351,7 @@ async def process_vertex_stream_request(
                         keep_alive_task.cancel()
 
                     if isinstance(first_result_from_existing, VertexCachedResponse):
-                        log("info", f"使用来自现有任务 Future 的结果", extra=log_extra)
+                        log("info", "使用来自现有任务 Future 的结果", extra=log_extra)
                         yield openAI_stream_chunk(
                             model=first_result_from_existing.model,
                             content=first_result_from_existing.text,
@@ -368,10 +368,10 @@ async def process_vertex_stream_request(
 
                 except asyncio.TimeoutError:
                     log(
-                        "warning", f"等待现有任务 Future 超时", extra=log_extra
+                        "warning", "等待现有任务 Future 超时", extra=log_extra
                     )  # 继续执行新任务
                 except asyncio.CancelledError:
-                    log("warning", f"等待现有任务 Future 时被取消", extra=log_extra)
+                    log("warning", "等待现有任务 Future 时被取消", extra=log_extra)
                     raise
                 except Exception as e:
                     log(
@@ -384,7 +384,7 @@ async def process_vertex_stream_request(
             # 3. 创建新的请求处理器任务
             log(
                 "info",
-                f"Vertex 假流式请求缓存未命中或等待失败，创建新任务组",
+                "Vertex 假流式请求缓存未命中或等待失败，创建新任务组",
                 extra=log_extra,
             )
             # --- Reverted Lock Logic ---
@@ -536,7 +536,7 @@ async def process_vertex_stream_request(
                                         first_successful_result = result
                                         log(
                                             "info",
-                                            f"假流式编排器: 收到首个成功响应",
+                                            "假流式编排器: 收到首个成功响应",
                                             extra=log_extra,
                                         )
 
@@ -590,7 +590,7 @@ async def process_vertex_stream_request(
                                     elif isinstance(result, VertexCachedResponse):
                                         log(
                                             "debug",
-                                            f"假流式编排器: API 调用成功但响应为空",
+                                            "假流式编排器: API 调用成功但响应为空",
                                             extra=log_extra,
                                         )
                                     else:  # result is None or Exception
@@ -603,7 +603,7 @@ async def process_vertex_stream_request(
                                 except asyncio.CancelledError:
                                     log(
                                         "info",
-                                        f"假流式编排器: API 任务被取消",
+                                        "假流式编排器: API 任务被取消",
                                         extra=log_extra,
                                     )
                                 except Exception as task_exc:
@@ -794,7 +794,7 @@ async def process_vertex_stream_request(
                         # This case is problematic - add failed, but get also failed or got a completed future.
                         log(
                             "error",
-                            f"真流式：注册 Future 失败且无法获取有效的现有 Future",
+                            "真流式：注册 Future 失败且无法获取有效的现有 Future",
                             extra=log_extra,
                         )
                         raise HTTPException(

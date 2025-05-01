@@ -1,4 +1,3 @@
-import os
 import app.config.settings as settings
 
 

@@ -2,7 +2,6 @@ import random
 import re
 import os
 import logging
-from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.utils.logging import format_log_message
 import app.config.settings as settings
