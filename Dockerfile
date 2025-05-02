@@ -2,9 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+RUN pip install uv
+
 COPY . .
 
-RUN pip install uv
 RUN uv sync
 
 EXPOSE 7860
