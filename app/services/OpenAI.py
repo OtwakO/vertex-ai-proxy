@@ -84,9 +84,7 @@ class OpenAIClient:
         }
         log("INFO", "流式请求开始", extra=extra_log)
 
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        )
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",

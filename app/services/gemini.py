@@ -1,13 +1,11 @@
-import requests
 import json
 import os
+import httpx  # 添加 httpx 导入
 from app.models import ChatCompletionRequest
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
-import httpx
 import secrets
 import string
-from app.utils import format_log_message
 import app.config.settings as settings
 
 from app.utils.logging import log
@@ -233,14 +231,9 @@ class GeminiClient:
                     config["allowed_function_names"] = allowed_functions
                 tool_config = {"function_calling_config": config}
 
-        # 3. 添加 tool_config 到 data，并处理依赖关系
+        # 3. 添加 tool_config 到 data
         if tool_config:
             data["tool_config"] = tool_config
-            if (
-                tool_config["function_calling_config"]["mode"] != "NONE"
-                and "tools" not in data
-            ):
-                data["tools"] = [{"function_declarations": []}]
 
         # 联网模式
         if settings.search["search_mode"] and model.endswith("-search"):
@@ -257,7 +250,7 @@ class GeminiClient:
 
         return api_version, data
 
-    # 真流式处理
+    # 流式请求
     async def stream_chat(
         self,
         request: ChatCompletionRequest,
@@ -328,7 +321,7 @@ class GeminiClient:
                     log("info", "流式请求结束")
 
     # 非流式处理
-    def complete_chat(
+    async def complete_chat(
         self,
         request: ChatCompletionRequest,
         contents,
@@ -345,8 +338,11 @@ class GeminiClient:
         }
 
         try:
-            response = requests.post(url, headers=headers, json=data)
-            response.raise_for_status()
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url, headers=headers, json=data, timeout=600
+                )
+                response.raise_for_status()  # 检查 HTTP 错误状态
 
             return GeminiResponseWrapper(response.json())
         except Exception:
@@ -358,7 +354,6 @@ class GeminiClient:
         errors = []
 
         system_instruction_text = ""
-        is_system_phase = use_system_prompt
         system_instruction_parts = []  # 用于收集系统指令文本
 
         # 处理系统指令
@@ -506,7 +501,8 @@ class GeminiClient:
                     ],
                 },
             )
-            log_msg = format_log_message("INFO", "伪装消息成功")
+            log("INFO", "伪装消息成功")
+
         return gemini_history, system_instruction
 
     @staticmethod

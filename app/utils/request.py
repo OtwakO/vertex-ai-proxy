@@ -1,6 +1,7 @@
 import asyncio
 import time
 from typing import Dict
+
 from app.utils.logging import log
 
 
@@ -28,25 +29,12 @@ class ActiveRequestsManager:
             return True
         return False
 
-    def remove_by_prefix(self, prefix: str):
-        """移除所有以特定前缀开头的活跃请求任务"""
-        keys_to_remove = [
-            k for k in self.active_requests.keys() if k.startswith(prefix)
-        ]
-        for key in keys_to_remove:
-            self.remove(key)
-        return len(keys_to_remove)
-
     def clean_completed(self):
         """清理所有已完成或已取消的任务"""
-        keys_to_remove = []
 
         for key, task in self.active_requests.items():
             if task.done() or task.cancelled():
-                keys_to_remove.append(key)
-
-        for key in keys_to_remove:
-            self.remove(key)
+                del self.active_requests[key]
 
         # if keys_to_remove:
         #    log('info', f"清理已完成请求任务: {len(keys_to_remove)}个", cleanup='active_requests')

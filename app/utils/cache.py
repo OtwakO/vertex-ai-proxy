@@ -1,12 +1,12 @@
 import time
-import hashlib
-import json
+import xxhash
 from typing import Dict, Any, Optional, Tuple
 import logging
 from collections import deque
 from app.utils.logging import log
 
 logger = logging.getLogger("my_logger")
+import heapq
 
 # 定义缓存项的结构
 CacheItem = Dict[str, Any]
@@ -41,10 +41,13 @@ class ResponseCacheManager:
         now = time.time()
         if cache_key in self.cache:
             cache_deque = self.cache[cache_key]
-            # 查找第一个未过期的项
+            # 查找第一个未过期的项，且不删除
             for item in cache_deque:
                 if now < item.get("expiry_time", 0):
-                    return item["response"], True  # 返回响应，不删除
+                    response = item.get("response", None)
+
+                    return response, True
+
         return None, False
 
     def get_and_remove(self, cache_key: str) -> Tuple[Optional[Any], bool]:
@@ -52,37 +55,28 @@ class ResponseCacheManager:
         now = time.time()
         if cache_key in self.cache:
             cache_deque = self.cache[cache_key]
-            item_to_remove = None
-            response = None
 
-            # 查找第一个未过期的项
+            # 查找第一个未过期的项，并删除它。顺便删除所有过期的项
             for item in cache_deque:
                 if now < item.get("expiry_time", 0):
-                    item_to_remove = item
-                    response = item["response"]
-                    break  # 找到第一个就停止
-                else:
+                    response = item.get("response", None)
+                    self.cur_cache_num = max(0, self.cur_cache_num - 1)
                     cache_deque.remove(item)
 
-            if item_to_remove:
-                try:
-                    cache_deque.remove(item_to_remove)  # 从deque中删除
-                    # log('info', f"从缓存获取并删除项: {cache_key[:8]}...")
-                    self.cur_cache_num -= 1
-                    if not cache_deque:  # 如果deque变空，则删除该键
+                    # 如果deque变空，则删除该键
+                    if not cache_deque:
                         del self.cache[cache_key]
+
+                    # 找到第一个就停止
                     return response, True
-                except ValueError:
-                    # 理论上不应该发生，因为我们刚从deque中找到了它
-                    log(
-                        "warning", f"尝试删除缓存项时出错（未找到）: {cache_key[:8]}..."
-                    )
-                    pass  # 继续执行到函数末尾返回 False
+                else:
+                    cache_deque.remove(item)
+                    self.cur_cache_num = max(0, self.cur_cache_num - 1)
 
         return None, False
 
     def store(self, cache_key: str, response: Any):
-        """存储响应到缓存（追加到键对应的deque）。"""
+        """存储响应到缓存（追加到键对应的deque）"""
         now = time.time()
         new_item: CacheItem = {
             "response": response,
@@ -92,21 +86,20 @@ class ResponseCacheManager:
 
         if cache_key not in self.cache:
             self.cache[cache_key] = deque()
-        # log('info', f"开始存储响应到deque末尾，当前cache：{self.cache}")
 
         self.cache[cache_key].append(new_item)  # 追加到deque末尾
 
-        # log('info', f"响应已缓存: {cache_key[:8]}...")
         self.cur_cache_num += 1
-        # 如果缓存总条目数超过限制，清理最旧的
-        self.clean_if_needed()
+
+        if self.cur_cache_num > self.max_entries:
+            self.clean_if_needed()
 
     def clean_expired(self):
         """清理所有缓存项中已过期的项。"""
         now = time.time()
         keys_to_remove = []
         for key, cache_deque in self.cache.items():
-            # 创建一个新的deque只包含未过期的项
+            # 创建一个新的deque , 只包含未过期的项
             valid_items = deque(
                 item for item in cache_deque if now < item.get("expiry_time", 0)
             )
@@ -114,8 +107,7 @@ class ResponseCacheManager:
             if len(valid_items) < len(cache_deque):
                 clean_num = len(cache_deque) - len(valid_items)
                 log("info", f"清理键 {key[:8]}... 的过期缓存项 {clean_num} 个。")
-                self.cur_cache_num -= clean_num
-
+                self.cur_cache_num = max(0, self.cur_cache_num - 1)
             if not valid_items:
                 keys_to_remove.append(key)  # 标记此键以便稍后删除
             else:
@@ -131,50 +123,73 @@ class ResponseCacheManager:
         if self.cur_cache_num <= self.max_entries:
             return
 
-        items_to_remove_count = self.cur_cache_num - self.max_entries
+        # 计算目标大小和需要移除的数量
+        target_size = max(self.max_entries - 5, 10)
+        if self.cur_cache_num <= target_size:  # 可能在并发场景下已经被清理
+            return
+
+        items_to_remove_count = self.cur_cache_num - target_size
         log(
             "info",
-            f"缓存总数 {self.cur_cache_num} 超过限制 {self.max_entries}，需要清理 {items_to_remove_count} 个最旧项。",
+            f"缓存总数 {self.cur_cache_num} 超过限制 {self.max_entries}，需要清理 {items_to_remove_count} 个",
         )
 
         # 收集所有缓存项及其元数据（键、创建时间、项本身）
         all_items_meta = []
         for key, cache_deque in self.cache.items():
             for item in cache_deque:
+                # 存储足够的信息以供查找和删除
                 all_items_meta.append(
                     {"key": key, "created_at": item.get("created_at", 0), "item": item}
                 )
 
-        # 按创建时间排序（升序，最旧的在前）
-        all_items_meta.sort(key=lambda x: x["created_at"])
+        # 使用 heapq.nsmallest 高效找出最旧的 N 项
 
-        # 确定要删除的最旧项
+        # 确保移除数量不超过实际存在的项目数
+        actual_remove_count = min(items_to_remove_count, len(all_items_meta))
+        if actual_remove_count <= 0:
+            return  # 没有项目可移除或无需移除
+
+        items_to_remove = heapq.nsmallest(
+            actual_remove_count, all_items_meta, key=lambda x: x["created_at"]
+        )
+
+        # 执行移除
         items_actually_removed = 0
         keys_potentially_empty = set()
-        for i in range(min(items_to_remove_count, len(all_items_meta))):
-            item_meta = all_items_meta[i]
+        for item_meta in items_to_remove:
             key_to_clean = item_meta["key"]
             item_to_clean = item_meta["item"]
 
             if key_to_clean in self.cache:
                 try:
+                    # 直接从 deque 中移除指定的 item 对象
                     self.cache[key_to_clean].remove(item_to_clean)
                     items_actually_removed += 1
-                    self.cur_cache_num -= 1
+                    # 成功移除后才更新计数器
+                    self.cur_cache_num = max(0, self.cur_cache_num - 1)
                     log(
-                        "debug",
+                        "info",
                         f"因容量限制，删除键 {key_to_clean[:8]}... 的旧缓存项 (创建于 {item_meta['created_at']})。",
                     )
                     keys_potentially_empty.add(key_to_clean)
                 except ValueError:
-                    # 可能在处理过程中已被其他操作删除，忽略
+                    # 如果项已被其他操作（如 get_and_remove 或 clean_expired）移除，
+                    # remove 会抛出 ValueError，这是正常的，忽略即可。
                     log(
                         "warning",
-                        f"尝试因容量限制删除缓存项时未找到: {key_to_clean[:8]}...",
+                        f"尝试因容量限制删除缓存项时未找到 (可能已被提前移除): {key_to_clean[:8]}...",
                     )
                     pass
+                except KeyError:
+                    # 如果键本身已被移除（例如，其 deque 变空并被删除），则忽略
+                    log(
+                        "warning",
+                        f"尝试因容量限制删除缓存项时键未找到: {key_to_clean[:8]}...",
+                    )
+                    pass  # Key already gone
 
-        # 检查是否有deque变空
+        # 检查是否有 deque 因本次清理变空
         for key in keys_potentially_empty:
             if key in self.cache and not self.cache[key]:
                 del self.cache[key]
@@ -183,7 +198,10 @@ class ResponseCacheManager:
                 )
 
         if items_actually_removed > 0:
-            log("info", f"因容量限制，共清理了 {items_actually_removed} 个旧缓存项。")
+            log(
+                "info",
+                f"因容量限制，共清理了 {items_actually_removed} 个旧缓存项。当前缓存数: {self.cur_cache_num}",
+            )
 
 
 # 根据模型名称和全部消息，生成请求的唯一缓存键。
@@ -193,109 +211,104 @@ def generate_cache_key_all(chat_request) -> str:
     Args:
         chat_request: 包含模型和消息列表的请求对象 (符合OpenAI格式)。
     Returns:
-        一个代表该请求的唯一缓存键字符串 (MD5哈希值)。
+        一个代表该请求的唯一缓存键字符串 (xxhash64哈希值)。
     """
-    # 创建包含请求关键信息的字典
-    request_data = {"model": chat_request.model, "messages": []}
+    h = xxhash.xxh64()
 
-    # 添加消息内容
+    # 1. 哈希模型名称
+    h.update(chat_request.model.encode("utf-8"))
+
+    # 2. 增量哈希所有消息
     for msg in chat_request.messages:
+        # 哈希角色
+        h.update(b"role:")
+        h.update(msg.role.encode("utf-8"))
+
+        # 哈希内容
         if isinstance(msg.content, str):
-            message_data = {"role": msg.role, "content": msg.content}
-            request_data["messages"].append(message_data)
+            h.update(b"text:")
+            h.update(msg.content.encode("utf-8"))
         elif isinstance(msg.content, list):
-            content_list = []
+            # 处理图文混合内容
             for item in msg.content:
-                if item.get("type") == "text":
-                    content_list.append({"type": "text", "text": item.get("text")})
-                # 对于图像数据，只使用标识符而不是全部数据
-                elif item.get("type") == "image_url":
-                    image_data = item.get("image_url", {}).get("url", "")
+                item_type = item.get("type") if hasattr(item, "get") else None
+                if item_type == "text":
+                    text = item.get("text", "") if hasattr(item, "get") else ""
+                    h.update(b"text:")  # 加入类型标识符
+                    h.update(text.encode("utf-8"))
+                elif item_type == "image_url":
+                    image_url = (
+                        item.get("image_url", {}) if hasattr(item, "get") else {}
+                    )
+                    image_data = (
+                        image_url.get("url", "") if hasattr(image_url, "get") else ""
+                    )
+
+                    h.update(b"image_url:")  # 加入类型标识符
                     if image_data.startswith("data:image/"):
-                        # 对于base64图像，使用前32字符的哈希作为标识符
-                        content_list.append(
-                            {
-                                "type": "image_url",
-                                "hash": hashlib.md5(
-                                    image_data[:32].encode()
-                                ).hexdigest(),
-                            }
-                        )
+                        # 对于base64图像，使用前32字符作为标识符
+                        h.update(image_data[:32].encode("utf-8"))
                     else:
-                        content_list.append({"type": "image_url", "url": image_data})
-            request_data["messages"].append({"role": msg.role, "content": content_list})
+                        h.update(image_data.encode("utf-8"))
 
-    # 将字典转换为JSON字符串并计算哈希值
-    json_data = json.dumps(request_data, sort_keys=True)
-    return hashlib.md5(json_data.encode()).hexdigest()
+    return h.hexdigest()
 
 
-def generate_cache_key(chat_request, last_n_user_messages: int = 4) -> str:
+def generate_cache_key(chat_request, last_n_user_messages: int = 8) -> str:
     """
     根据模型名称和最后 N 条消息生成请求的唯一缓存键。
     Args:
         chat_request: 包含模型和消息列表的请求对象 (符合OpenAI格式)。
         last_n_user_messages: 需要包含在缓存键计算中的最后消息的数量。
     Returns:
-        一个代表该请求的唯一缓存键字符串 (MD5哈希值)。
+        一个代表该请求的唯一缓存键字符串 (xxhash64哈希值)。
     """
+    h = xxhash.xxh64()
+
+    # 1. 哈希模型名称
+    h.update(chat_request.model.encode("utf-8"))
+
     if last_n_user_messages <= 0:
-        # 如果不考虑任何消息，只基于模型生成key
-        key_data = {"model": chat_request.model}
-        json_data = json.dumps(key_data, sort_keys=True)
-        return hashlib.md5(json_data.encode()).hexdigest()
+        # 如果不考虑消息，直接返回基于模型的哈希
+        return h.hexdigest()
 
-    selected_user_messages_reversed = []  # 临时存放反向找到的消息
-    user_messages_found = 0
-
-    # 从消息列表末尾开始向前查找
+    messages_processed = 0
+    # 2. 增量哈希最后 N 条消息 (从后往前)
     for msg in reversed(chat_request.messages):
-        processed_content = None
+        if messages_processed >= last_n_user_messages:
+            break
 
+        # 哈希角色
+        h.update(b"role:")
+        h.update(msg.role.encode("utf-8"))
+
+        # 哈希内容
         if isinstance(msg.content, str):
-            processed_content = msg.content
+            h.update(b"text:")
+            h.update(msg.content.encode("utf-8"))
         elif isinstance(msg.content, list):
             # 处理图文混合内容
-            content_list = []
             for item in msg.content:
                 item_type = item.get("type") if hasattr(item, "get") else None
                 if item_type == "text":
                     text = item.get("text", "") if hasattr(item, "get") else ""
-                    content_list.append({"type": "text", "text": text})
+                    h.update(b"text:")
+                    h.update(text.encode("utf-8"))
                 elif item_type == "image_url":
-                    image_url_data = (
+                    image_url = (
                         item.get("image_url", {}) if hasattr(item, "get") else {}
                     )
-                    url = (
-                        image_url_data.get("url", "")
-                        if hasattr(image_url_data, "get")
-                        else ""
+                    image_data = (
+                        image_url.get("url", "") if hasattr(image_url, "get") else ""
                     )
-                    if url.startswith("data:image/"):
-                        # 对于base64图像，使用前32字符的哈希作为标识符
-                        img_hash = hashlib.md5(url[:32].encode()).hexdigest()
-                        content_list.append({"type": "image_url", "hash": img_hash})
+
+                    h.update(b"image_url:")  # 加入类型标识符
+                    if image_data.startswith("data:image/"):
+                        # 对于base64图像，使用前32字符作为标识符
+                        h.update(image_data[:32].encode("utf-8"))
                     else:
-                        content_list.append({"type": "image_url", "url": url})
+                        h.update(image_data.encode("utf-8"))
 
-            processed_content = content_list
+        messages_processed += 1
 
-        # 如果内容成功处理，则添加到列表中
-        if processed_content is not None:
-            selected_user_messages_reversed.append(
-                {"role": msg.role, "content": processed_content}
-            )
-            user_messages_found += 1
-            # 如果已找到足够数量的消息，停止遍历
-            if user_messages_found >= last_n_user_messages:
-                break
-
-    # 创建用于生成缓存键的数据结构，只包含模型和选定的消息（反序）
-    key_data = {
-        "model": chat_request.model,
-        "last_user_messages": selected_user_messages_reversed,  # 使用特定键名区分
-    }
-    # 将字典转换为排序后的JSON字符串并计算哈希值
-    # 使用 sort_keys=True 确保相同内容但顺序不同的字典能生成相同的key
-    json_data = json.dumps(key_data, sort_keys=True)
-    return hashlib.md5(json_data.encode()).hexdigest()
+    return h.hexdigest()

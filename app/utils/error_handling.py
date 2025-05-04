@@ -1,4 +1,5 @@
 import requests
+import httpx  # 添加 httpx 导入
 import logging
 import asyncio
 from fastapi import HTTPException
@@ -8,7 +9,8 @@ logger = logging.getLogger("my_logger")
 
 
 def handle_gemini_error(error, current_api_key) -> str:
-    if isinstance(error, requests.exceptions.HTTPError):
+    # 同时检查 requests 和 httpx 的 HTTPError
+    if isinstance(error, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
         status_code = error.response.status_code
         if status_code == 400:
             try:
@@ -141,7 +143,8 @@ async def handle_api_error(
 ):
     """统一处理API错误"""
 
-    if isinstance(e, requests.exceptions.HTTPError):
+    # 同时检查 requests 和 httpx 的 HTTPError
+    if isinstance(e, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
         status_code = e.response.status_code
         # 对500和503错误实现自动重试机制, 最多重试3次
         if retry_count < 3 and (status_code == 500 or status_code == 503):

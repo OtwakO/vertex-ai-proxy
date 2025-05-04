@@ -3,3 +3,5 @@
 **/.venv/
 **/.vscode/
 **/.ruff_cache/
+**/.roo/
+.gitignore

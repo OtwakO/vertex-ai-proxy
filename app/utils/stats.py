@@ -43,10 +43,10 @@ async def update_api_call_stats(api_call_stats, endpoint=None, model=None, token
             api_call_stats["calls"].append(call_record)
 
             # 记录日志
-            log_message = f"API调用已记录: 端点 '{endpoint[:8]}', 模型 '{model[:8]}', 令牌: {token if token is not None else 0}"
+            log_message = f"API调用已记录: 秘钥 '{endpoint[:8]}', 模型 '{model}', 令牌: {token if token is not None else 0}"
             log("info", log_message)
         else:
-            log("warning", "API调用记录不完整: 缺少端点或模型信息")
+            log("warning", "API调用记录不完整: 缺少秘钥或模型信息")
 
 
 async def get_api_key_usage(api_call_stats, api_key, model=None):

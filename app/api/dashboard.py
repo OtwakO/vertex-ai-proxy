@@ -1,9 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
-from app.utils import (
-    log_manager,
-    clean_expired_stats,
-)
+import asyncio
+import threading
+from app.utils import log_manager, clean_expired_stats
 import app.config.settings as settings
 from app.services import GeminiClient
 from app.utils.auth import verify_web_password
@@ -18,6 +17,16 @@ dashboard_router = APIRouter(prefix="/api", tags=["dashboard"])
 key_manager = None
 response_cache_manager = None
 active_requests_manager = None
+
+# 用于存储API密钥检测的进度信息
+api_key_test_progress = {
+    "is_running": False,
+    "completed": 0,
+    "total": 0,
+    "valid": 0,
+    "invalid": 0,
+    "is_completed": False,
+}
 
 
 def init_dashboard_router(key_mgr, cache_mgr, active_req_mgr):
@@ -204,6 +213,8 @@ async def get_dashboard_data():
         "max_concurrent_requests": settings.MAX_CONCURRENT_REQUESTS,
         # 启用vertex
         "enable_vertex": settings.ENABLE_VERTEX,
+        # 添加最大重试次数
+        "max_retry_num": settings.MAX_RETRY_NUM,
     }
 
 
@@ -390,6 +401,22 @@ async def update_config(config_data: dict):
             settings.ENABLE_VERTEX = config_value
             log("info", f"Vertex AI 已更新为：{config_value}")
 
+        elif config_key == "max_retry_num":
+            try:
+                value = int(config_value)
+                if value <= 0:
+                    raise ValueError("最大重试次数必须大于0")
+                settings.MAX_RETRY_NUM = value
+                log("info", f"最大重试次数已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+
+        elif config_key == "search_prompt":
+            if not isinstance(config_value, str):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为字符串")
+            settings.search["search_prompt"] = config_value
+            log("info", f"联网搜索提示已更新为：{config_value}")
+
         elif config_key == "gemini_api_keys":
             if not isinstance(config_value, str):
                 raise HTTPException(
@@ -417,11 +444,6 @@ async def update_config(config_data: dict):
                 if key not in key_manager.api_keys:
                     key_manager.api_keys.append(key)
                     added_key_count += 1
-
-            # 更新MAX_RETRY_NUM
-            if added_key_count > 0:
-                settings.MAX_RETRY_NUM += added_key_count
-                log("info", f"MAX_RETRY_NUM已更新为：{settings.MAX_RETRY_NUM}")
 
             # 重置密钥栈
             key_manager._reset_key_stack()
@@ -460,3 +482,165 @@ async def update_config(config_data: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新失败：{str(e)}")
+
+
+@dashboard_router.post("/test-api-keys")
+async def test_api_keys(password_data: dict):
+    """
+    测试所有API密钥的有效性
+
+    Args:
+        password_data (dict): 包含密码的字典
+
+    Returns:
+        dict: 操作结果
+    """
+    try:
+        if not isinstance(password_data, dict):
+            raise HTTPException(status_code=422, detail="请求体格式错误：应为JSON对象")
+
+        password = password_data.get("password")
+        if not password:
+            raise HTTPException(status_code=400, detail="缺少密码参数")
+
+        if not isinstance(password, str):
+            raise HTTPException(status_code=422, detail="密码参数类型错误：应为字符串")
+
+        if not verify_web_password(password):
+            raise HTTPException(status_code=401, detail="密码错误")
+
+        # 检查是否已经有测试在运行
+        if api_key_test_progress["is_running"]:
+            raise HTTPException(status_code=409, detail="已有API密钥检测正在进行中")
+
+        # 获取有效密钥列表
+        valid_keys = key_manager.api_keys.copy()
+
+        # 启动异步测试
+        threading.Thread(
+            target=start_api_key_test_in_thread, args=(valid_keys,), daemon=True
+        ).start()
+
+        return {
+            "status": "success",
+            "message": "API密钥检测已启动，将同时检测有效密钥和无效密钥",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"启动API密钥检测失败：{str(e)}")
+
+
+@dashboard_router.get("/test-api-keys/progress")
+async def get_test_api_keys_progress():
+    """
+    获取API密钥检测进度
+
+    Returns:
+        dict: 进度信息
+    """
+    return api_key_test_progress
+
+
+def check_api_key_in_thread(key):
+    """在线程中检查单个API密钥的有效性"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        is_valid = loop.run_until_complete(test_api_key(key))
+        if is_valid:
+            log("info", f"API密钥 {key[:8]}... 有效")
+            return key, True
+        else:
+            log("warning", f"API密钥 {key[:8]}... 无效")
+            return key, False
+    finally:
+        loop.close()
+
+
+async def test_api_key(key):
+    """测试单个API密钥是否有效"""
+    try:
+        # 尝试列出可用模型来检查API密钥是否有效
+        all_models = await GeminiClient.list_available_models(key)
+        return len(all_models) > 0
+    except Exception as e:
+        log("error", f"测试API密钥 {key[:8]}... 时出错: {str(e)}")
+        return False
+
+
+def start_api_key_test_in_thread(keys):
+    """在线程中启动API密钥检测过程"""
+    # 重置进度信息
+    api_key_test_progress.update(
+        {
+            "is_running": True,
+            "completed": 0,
+            "total": 0,  # 稍后会更新
+            "valid": 0,
+            "invalid": 0,
+            "is_completed": False,
+        }
+    )
+
+    try:
+        # 获取所有需要检测的密钥（包括当前GEMINI_API_KEYS和INVALID_API_KEYS）
+        current_keys = keys
+
+        # 获取当前无效密钥
+        invalid_api_keys = (
+            settings.INVALID_API_KEYS.split(",") if settings.INVALID_API_KEYS else []
+        )
+        invalid_api_keys = [key.strip() for key in invalid_api_keys if key.strip()]
+
+        # 合并所有需要测试的密钥，去重
+        all_keys_to_test = list(set(current_keys + invalid_api_keys))
+
+        # 更新总数
+        api_key_test_progress["total"] = len(all_keys_to_test)
+
+        # 创建有效和无效密钥列表
+        valid_keys = []
+        invalid_keys = []
+
+        # 检查每个密钥
+        for key in all_keys_to_test:
+            # 检查密钥
+            _, is_valid = check_api_key_in_thread(key)
+
+            # 更新进度
+            api_key_test_progress["completed"] += 1
+
+            # 将密钥添加到相应列表
+            if is_valid:
+                valid_keys.append(key)
+                api_key_test_progress["valid"] += 1
+            else:
+                invalid_keys.append(key)
+                api_key_test_progress["invalid"] += 1
+
+        # 更新全局密钥列表
+        key_manager.api_keys = valid_keys
+
+        # 更新设置中的有效和无效密钥
+        settings.GEMINI_API_KEYS = ",".join(valid_keys)
+        settings.INVALID_API_KEYS = ",".join(invalid_keys)
+
+        # 更新最大重试次数
+        settings.MAX_RETRY_NUM = len(valid_keys)
+
+        # 保存设置
+        save_settings()
+
+        # 重置密钥栈
+        key_manager._reset_key_stack()
+
+        log(
+            "info",
+            f"API密钥检测完成。有效密钥: {len(valid_keys)}，无效密钥: {len(invalid_keys)}",
+        )
+    except Exception as e:
+        log("error", f"API密钥检测过程中发生错误: {str(e)}")
+    finally:
+        # 标记检测完成
+        api_key_test_progress.update({"is_running": False, "is_completed": True})

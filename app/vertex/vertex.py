@@ -545,10 +545,7 @@ def create_gemini_prompt(
             parts = []
 
             # 只记录结构信息
-            # log(
-            #     "debug",
-            #     f"消息 {idx}: role={role}, content_type={type(message.content).__name__}",
-            # )
+            # log('debug', f"消息 {idx}: role={role}, content_type={type(message.content).__name__}")
 
             if isinstance(message.content, str):
                 # 只记录是否为空
@@ -1320,7 +1317,7 @@ async def chat_completions(request: OpenAIRequest, api_key: Optional[str] = None
                                 )
                                 if not is_response_valid(response):
                                     raise ValueError(
-                                        f"Invalid or empty response received: {response}"
+                                        "Invalid or empty response received"
                                     )  # Trigger retry
 
                                 return convert_to_openai_format(response, request.model)
@@ -1466,7 +1463,7 @@ async def chat_completions(request: OpenAIRequest, api_key: Optional[str] = None
                     )
                     if not is_response_valid(response):
                         raise ValueError(
-                            f"Invalid or empty response received: {response}"
+                            "Invalid or empty response received"
                         )  # Trigger retry
 
                     openai_response = convert_to_openai_format(response, request.model)

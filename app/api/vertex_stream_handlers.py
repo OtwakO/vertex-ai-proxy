@@ -11,9 +11,13 @@ import app.config.settings as settings
 from app.models import ChatCompletionRequest
 from app.utils import (
     handle_gemini_error,
-    log,
-    openAI_stream_chunk,
+    # log, # Use vertex_log instead
+    # vertex_log as log, # Incorrect path
+    # openAI_stream_chunk, # 废弃
+    # openAI_from_Gemini, # 移动到正确的导入路径
 )
+from app.utils.logging import vertex_log as log  # Correct import path
+from app.utils.response import openAI_from_Gemini  # 从正确的模块导入
 from app.vertex.vertex import OpenAIMessage, OpenAIRequest
 from app.vertex.vertex import chat_completions as vertex_chat_completions_impl
 
@@ -24,14 +28,33 @@ from .client_disconnect import check_client_disconnect
 # Vertex 缓存响应结构 (内部使用)
 # 与 nonstream_handlers.py 中的定义保持一致
 class VertexCachedResponse:
-    def __init__(self, text, model, total_token_count=0):
-        self.text = text
-        self.model = model
-        self.total_token_count = (
-            total_token_count if total_token_count is not None else 0
+    # 与 nonstream_handlers.py 中的定义保持一致
+    def __init__(
+        self,
+        text,
+        model,
+        prompt_token_count=0,
+        candidates_token_count=0,
+        total_token_count=0,
+        finish_reason="stop",
+        function_call=None,
+    ):
+        self.text = text  # 响应文本内容
+        self.model = model  # 模型名称
+        # 确保 token 计数是整数，处理 None 的情况
+        self.prompt_token_count = (
+            int(prompt_token_count) if prompt_token_count is not None else 0
         )
-        self.prompt_token_count = 0
-        self.candidates_token_count = 0
+        self.candidates_token_count = (
+            int(candidates_token_count) if candidates_token_count is not None else 0
+        )
+        self.total_token_count = (
+            int(total_token_count) if total_token_count is not None else 0
+        )
+        # finish_reason 对于流式处理很重要
+        self.finish_reason = finish_reason
+        # function_call 支持
+        self.function_call = function_call
 
 
 async def _execute_single_fake_vertex_call(
@@ -64,8 +87,11 @@ async def _execute_single_fake_vertex_call(
         )
 
         response_text = ""
+        prompt_tokens = 0
+        candidates_tokens = 0
         total_tokens = 0
         response_content = None
+        function_call_data = None  # 支持函数调用
 
         # --- 解析 Vertex 响应 ---
         if isinstance(vertex_response, JSONResponse):
@@ -84,10 +110,10 @@ async def _execute_single_fake_vertex_call(
                 f"假流式调用 #{call_index}: Vertex API 调用返回或引发异常: {vertex_response}",
                 extra=log_extra,
             )
-            handle_gemini_error(vertex_response, "Vertex")
+            handle_gemini_error(vertex_response, "Vertex")  # 使用通用错误处理
             return None
         elif isinstance(vertex_response, dict):
-            response_content = vertex_response  # 直接使用字典响应
+            response_content = vertex_response  # 直接使用字典
         else:
             log(
                 "error",
@@ -102,17 +128,38 @@ async def _execute_single_fake_vertex_call(
             if choices and isinstance(choices[0], dict):
                 message = choices[0].get("message", {})
                 response_text = message.get("content", "")
-            usage = response_content.get("usage", {})
-            total_tokens = usage.get("total_tokens") if usage else 0
-            total_tokens = total_tokens if total_tokens is not None else 0
-
-        if response_text:
-            response_obj = VertexCachedResponse(
-                text=response_text,
-                model=chat_request.model,
-                total_token_count=total_tokens,
+                # TODO: 解析函数调用 (如果 Vertex 支持)
+                # function_call_data = message.get("tool_calls") or message.get("function_call")
+            usage = response_content.get("usage", {})  # 获取 usage 字段
+            if usage:
+                prompt_tokens = usage.get("prompt_tokens")
+                candidates_tokens = usage.get(
+                    "completion_tokens"
+                )  # Vertex 使用 completion_tokens
+                total_tokens = usage.get("total_tokens")
+            # 确保 token 计数是整数或 0
+            prompt_tokens = int(prompt_tokens) if prompt_tokens is not None else 0
+            candidates_tokens = (
+                int(candidates_tokens) if candidates_tokens is not None else 0
             )
-            log("debug", f"假流式调用 #{call_index}: 成功获取响应对象", extra=log_extra)
+            total_tokens = int(total_tokens) if total_tokens is not None else 0
+
+        # 根据是否有有效文本内容或函数调用返回成功或空状态
+        if response_text or function_call_data:
+            response_obj = VertexCachedResponse(
+                text=response_text,  # 文本内容
+                model=chat_request.model,  # 模型名称
+                prompt_token_count=prompt_tokens,  # prompt tokens
+                candidates_token_count=candidates_tokens,  # completion tokens
+                total_token_count=total_tokens,  # total tokens
+                # finish_reason 默认为 stop，由 VertexCachedResponse 设置
+                function_call=function_call_data,  # 函数调用数据
+            )
+            log(
+                "debug",
+                f"假流式调用 #{call_index}: 成功解析 Vertex 响应",
+                extra=log_extra,
+            )
             return response_obj
         else:
             log(
@@ -132,7 +179,7 @@ async def _execute_single_fake_vertex_call(
             exc_info=True,
             extra=log_extra,
         )
-        handle_gemini_error(e, "Vertex")
+        handle_gemini_error(e, "Vertex")  # 使用通用错误处理
         return None  # 返回 None 表示发生异常
 
 
@@ -144,10 +191,14 @@ async def _await_and_cache_background_fake_calls(
     context_label: str = "后台缓存假流任务",
 ):
     """
-    后台任务：等待剩余的假流式 API 调用任务完成，并将成功的完整结果存入缓存。
-    这些任务是被 shield 的，确保即使主请求完成或取消，它们也能继续执行以填充缓存。
+    后台任务：等待剩余的被 shield 的假流式 API 调用任务完成，并将成功的完整结果存入缓存。
     """
     if not shielded_tasks:
+        log(
+            "debug",
+            "后台缓存任务：没有需要等待的 shielded 任务",
+            extra={"cache_key": cache_key[:8]},
+        )
         return
 
     log_extra = {**log_extra_base, "request_type": context_label}
@@ -160,6 +211,7 @@ async def _await_and_cache_background_fake_calls(
     results = []
     gather_exception = None
     timeout_duration = settings.REQUEST_TIMEOUT  # 使用全局超时设置
+    timed_out_tasks = 0  # 记录 gather 超时但任务本身未完成的数量
 
     try:
         # 使用 gather 等待所有后台任务完成，return_exceptions=True 使得单个任务的异常不会中断 gather
@@ -168,19 +220,30 @@ async def _await_and_cache_background_fake_calls(
             timeout=timeout_duration,
         )
     except asyncio.TimeoutError:
+        # 处理 gather 本身的超时
         log(
-            "error",
+            "warning",
             f"{context_label}: gather 等待超时 ({timeout_duration}s)",
             extra=log_extra,
         )
-        gather_exception = asyncio.TimeoutError(
-            "Background fake stream caching gather timed out"
-        )
-        results = [
-            task.result() if task.done() else asyncio.TimeoutError("Task timed out")
-            for task in shielded_tasks
-        ]
+        gather_exception = asyncio.TimeoutError("Background caching gather timed out")
+        results = []
+        # 超时后，检查哪些任务实际完成了，哪些没有
+        for task in shielded_tasks:
+            if task.done():
+                try:
+                    results.append(task.result())  # 获取已完成任务的结果或异常
+                except Exception as e:
+                    results.append(e)  # 记录任务本身的异常
+            else:
+                # 标记任务因 gather 超时而未完成
+                timed_out_tasks += 1
+                results.append(
+                    asyncio.TimeoutError("Task did not complete within gather timeout")
+                )
+                task.cancel()  # 尝试取消仍在运行的任务
     except Exception as e:
+        # 处理 gather 发生的其他异常
         log(
             "error",
             f"{context_label}: gather 发生意外错误: {e}",
@@ -188,53 +251,66 @@ async def _await_and_cache_background_fake_calls(
             exc_info=True,
         )
         gather_exception = e
-        results = [task.result() if task.done() else e for task in shielded_tasks]
-
-    success_count = 0
-    error_count = 0
-    empty_count = 0
-    cancelled_count = 0
-    timeout_count = 0
-    first_success_cached = False  # 确保只记录一次首次缓存成功
-
-    for result in results:
-        if isinstance(result, VertexCachedResponse):
-            # 成功返回了有效结果对象
-            if result.text:  # 只缓存非空结果
-                # 直接存储当前成功结果，ResponseCacheManager 会处理追加逻辑
-                response_cache_manager.store(cache_key, result)
-                log("info", f"{context_label}: 成功结果已缓存", extra=log_extra)
-                success_count += 1
+        results = []
+        for task in shielded_tasks:
+            if task.done():
+                try:
+                    results.append(task.result())
+                except Exception as ex:
+                    results.append(ex)
             else:
-                empty_count += 1  # 成功但结果为空
-        elif result is None:
-            # 助手函数内部处理后返回 None (例如解析失败或API返回空)
-            empty_count += 1
-        elif isinstance(result, asyncio.CancelledError):
-            cancelled_count += 1
-        elif isinstance(result, asyncio.TimeoutError):
-            timeout_count += 1
-        elif isinstance(result, Exception):
-            # 任务执行期间发生异常
-            log("error", f"{context_label}: 任务结果为异常: {result}", extra=log_extra)
-            error_count += 1
+                # 标记任务因 gather 错误而未完成
+                timed_out_tasks += 1
+                results.append(
+                    RuntimeError("Task did not complete due to gather error")
+                )
+                task.cancel()  # 尝试取消
+
+    # 统计并记录后台任务的最终结果
+    counts = {
+        "success": 0,
+        "empty": 0,
+        "error": 0,
+        "cancelled": 0,
+        "timeout": timed_out_tasks,
+    }
+    log(
+        "debug",
+        f"{context_label}: gather 完成，开始处理 {len(results)} 个结果",
+        extra=log_extra,
+    )
+
+    # 导入辅助函数 (避免循环导入)
+    from .vertex_nonstream_handlers import _process_task_result
+
+    for i, result in enumerate(results):
+        task_num = i + 1
+        task_context = f"{context_label} #{task_num}"
+        # 使用辅助函数处理每个后台任务的结果
+        status, _ = _process_task_result(
+            result, cache_key, response_cache_manager, log_extra, task_context
+        )
+        if status in counts:
+            # 'timeout' 状态已在 gather 超时处理中计数
+            if status != "timeout":
+                counts[status] += 1
         else:
             log(
                 "error",
-                f"{context_label}: 任务返回未知类型结果: {type(result)}",
+                f"{task_context}: 处理结果时遇到未知状态 '{status}'",
                 extra=log_extra,
             )
-            error_count += 1  # 视为错误
+            counts["error"] += 1  # 归为错误
 
-    log_message = (
-        f"{context_label}: 完成. 结果: "
-        f"成功(尝试缓存首个)={success_count}, 空响应={empty_count}, 错误={error_count}, "
-        f"取消={cancelled_count}, 超时/未完成={timeout_count}"
+    log_summary = (
+        f"{context_label}: 完成. 统计: "
+        f"成功缓存={counts['success']}, 空响应={counts['empty']}, 错误={counts['error']}, "
+        f"取消={counts['cancelled']}, 超时/未完成={counts['timeout']}"
     )
     if gather_exception:
-        log_message += f". Gather 异常: {type(gather_exception).__name__}"
+        log_summary += f". Gather 异常: {type(gather_exception).__name__}"
 
-    log("info", log_message, extra=log_extra)
+    log("info", log_summary, extra=log_extra)
 
 
 async def process_vertex_stream_request(
@@ -259,7 +335,6 @@ async def process_vertex_stream_request(
     async def stream_response_generator() -> AsyncGenerator[str, None]:
         if settings.FAKE_STREAMING:
             # --- 假流式处理逻辑 (带后台缓存) ---
-            # [Fake streaming logic remains unchanged]
             log_extra = {**log_extra_base, "request_type": "vertex-fake-stream"}
             log("info", "Vertex 请求进入假流式处理模式 (带后台缓存)", extra=log_extra)
 
@@ -274,38 +349,33 @@ async def process_vertex_stream_request(
                     extra=log_extra,
                 )
                 try:
-                    yield openAI_stream_chunk(
-                        model=cached_response.model,
-                        content=cached_response.text,
-                        finish_reason="stop",
-                    )
-                    return  # 成功产生响应并已移除缓存项
+                    # Use async for since openAI_from_Gemini will be an async generator for streams
+                    async for chunk in openAI_from_Gemini(cached_response, stream=True):
+                        yield chunk
+                    return
+                except GeneratorExit:
+                    log("warning", "缓存命中后 yield 时客户端断开连接", extra=log_extra)
+                    raise
                 except Exception as e_yield:
-                    # 处理 yield 可能出现的错误 (例如连接断开)
                     log(
                         "error",
                         f"缓存命中后 yield 块时出错: {e_yield}",
                         extra=log_extra,
                     )
-                    # 缓存项已被 get_and_remove 移除
-                    raise  # 重新抛出异常
+                    raise
             elif cache_hit:
-                # 缓存命中但类型不正确 (已被 get_and_remove 移除)
                 log(
                     "warning",
                     f"缓存命中但类型不符 (期望 VertexCachedResponse, 得到 {type(cached_response)})，已移除错误项，视为缓存未命中",
                     extra=log_extra,
                 )
-                # 无需额外移除，继续执行后续逻辑
-            # else: 缓存未命中，继续执行后续逻辑
 
-            # 2. 检查是否有相同请求正在处理 (Future check, 使用锁保证原子性)
-            orchestrator_pool_key = f"vertex_orchestrator:{cache_key}"
+            # 2. 检查是否有相同请求正在处理 (Future check)
+            # 使用 'fakestream:' 前缀区分 Future
+            orchestrator_pool_key = f"fakestream:vertex_orchestrator:{cache_key}"
             main_orchestration_future: Optional[asyncio.Future] = None
-            is_new_future = False  # 标记是否是当前请求创建了 Future
-            existing_future = active_requests_manager.get(
-                orchestrator_pool_key
-            )  # Check before lock for early exit
+            existing_future = active_requests_manager.get(orchestrator_pool_key)
+
             if (
                 isinstance(existing_future, asyncio.Future)
                 and not existing_future.done()
@@ -317,8 +387,8 @@ async def process_vertex_stream_request(
                 )
                 keep_alive_task = None
                 try:
-                    yield openAI_stream_chunk(
-                        model=chat_request.model, content=""
+                    yield openAI_from_Gemini(
+                        model=chat_request.model, content="", stream=True
                     )  # 初始保活
 
                     async def send_keep_alive_while_waiting():
@@ -326,10 +396,17 @@ async def process_vertex_stream_request(
                             await asyncio.sleep(settings.FAKE_STREAMING_INTERVAL)
                             if not existing_future.done():
                                 try:
-                                    yield openAI_stream_chunk(
-                                        model=chat_request.model, content=""
+                                    yield openAI_from_Gemini(
+                                        model=chat_request.model,
+                                        content="",
+                                        stream=True,
                                     )
                                 except GeneratorExit:
+                                    log(
+                                        "info",
+                                        "等待 Future 保活任务: 客户端断开",
+                                        extra=log_extra,
+                                    )
                                     break
                                 except Exception as e_inner:
                                     log(
@@ -342,7 +419,6 @@ async def process_vertex_stream_request(
                     keep_alive_task = asyncio.create_task(
                         send_keep_alive_while_waiting()
                     )
-
                     first_result_from_existing = await asyncio.wait_for(
                         existing_future, timeout=settings.REQUEST_TIMEOUT
                     )
@@ -352,31 +428,43 @@ async def process_vertex_stream_request(
 
                     if isinstance(first_result_from_existing, VertexCachedResponse):
                         log("info", "使用来自现有任务 Future 的结果", extra=log_extra)
-                        yield openAI_stream_chunk(
-                            model=first_result_from_existing.model,
-                            content=first_result_from_existing.text,
-                            finish_reason="stop",
-                        )
-                        return
+                        try:
+                            # Use async for since openAI_from_Gemini will be an async generator for streams
+                            async for chunk in openAI_from_Gemini(
+                                first_result_from_existing, stream=True
+                            ):
+                                yield chunk
+                            return
+                        except GeneratorExit:
+                            log(
+                                "warning",
+                                "等待 Future 成功后 yield 时客户端断开连接",
+                                extra=log_extra,
+                            )
+                            raise
+                        except Exception as e_yield_future:
+                            log(
+                                "error",
+                                f"等待 Future 成功后 yield 时出错: {e_yield_future}",
+                                extra=log_extra,
+                            )
+                            raise
                     else:
                         log(
                             "error",
                             f"现有任务 Future 返回意外类型: {type(first_result_from_existing)}",
                             extra=log_extra,
                         )
-                        # 继续执行新任务
 
                 except asyncio.TimeoutError:
-                    log(
-                        "warning", "等待现有任务 Future 超时", extra=log_extra
-                    )  # 继续执行新任务
+                    log("warning", "等待现有任务 Future 超时", extra=log_extra)
                 except asyncio.CancelledError:
                     log("warning", "等待现有任务 Future 时被取消", extra=log_extra)
                     raise
                 except Exception as e:
                     log(
                         "error", f"等待现有任务 Future 时发生错误: {e}", extra=log_extra
-                    )  # 继续执行新任务
+                    )
                 finally:
                     if keep_alive_task and not keep_alive_task.done():
                         keep_alive_task.cancel()
@@ -387,296 +475,360 @@ async def process_vertex_stream_request(
                 "Vertex 假流式请求缓存未命中或等待失败，创建新任务组",
                 extra=log_extra,
             )
-            # --- Reverted Lock Logic ---
             main_orchestration_future = asyncio.Future()
-            if not active_requests_manager.add(
+            we_created_the_future = False
+            if active_requests_manager.add(
                 orchestrator_pool_key, main_orchestration_future
             ):
+                we_created_the_future = True
+                log("info", "成功注册新的 Vertex Future (假流式)", extra=log_extra)
+            else:
                 log(
                     "warning",
-                    f"尝试注册 Future 时发现键已存在: {orchestrator_pool_key}",
+                    f"尝试注册 Vertex Future 时发现键已存在 (竞态条件): {orchestrator_pool_key}",
                     extra=log_extra,
                 )
-                # Attempt to use the existing future if add failed
                 existing_future_retry = active_requests_manager.get(
                     orchestrator_pool_key
                 )
                 if isinstance(existing_future_retry, asyncio.Future):
                     main_orchestration_future = existing_future_retry
-                else:
-                    # If it's not a future or doesn't exist anymore, raise error
-                    raise HTTPException(
-                        status_code=500, detail="内部服务器错误：请求状态管理冲突"
-                    )
-            # --- End Reverted Lock Logic ---
-
-            # --- 如果是新创建的 Future，则启动编排器 ---
-            # [Block moved to after _orchestrator definition]
-
-            # --- 内部请求编排器 ---
-            async def _orchestrator():
-                api_call_tasks_unshielded = []
-                api_call_tasks_shielded = []
-                disconnect_monitor_task = None
-                all_tasks_to_wait = []
-                winner_found = False
-                background_cache_triggered = False
-                winner_task_ref = None  # 引用获胜的核心任务
-
-                try:
-                    openai_messages = [
-                        OpenAIMessage(role=m.role, content=m.content)
-                        for m in chat_request.messages
-                    ]
-                    vertex_request_payload = OpenAIRequest(
-                        model=chat_request.model,
-                        messages=openai_messages,
-                        stream=False,
-                        temperature=chat_request.temperature,
-                        max_tokens=chat_request.max_tokens,
-                        top_p=chat_request.top_p,
-                        top_k=chat_request.top_k,
-                        stop=chat_request.stop,
-                        presence_penalty=chat_request.presence_penalty,
-                        frequency_penalty=chat_request.frequency_penalty,
-                        seed=getattr(chat_request, "seed", None),
-                        n=chat_request.n,
-                    )
-
-                    num_concurrent_requests = settings.CONCURRENT_REQUESTS
                     log(
                         "info",
-                        f"假流式编排器: 发起 {num_concurrent_requests} 个并发 API 调用",
+                        "使用由并发请求创建的 Vertex Future (竞态条件)",
                         extra=log_extra,
                     )
-
-                    for i in range(num_concurrent_requests):
-                        core_api_task = asyncio.create_task(
-                            _execute_single_fake_vertex_call(
-                                chat_request=chat_request,
-                                vertex_request_payload=vertex_request_payload,
-                                call_index=i + 1,
-                                log_extra_base=log_extra_base,
-                            ),
-                            name=f"VertexFakeStreamCore-{i + 1}-{cache_key[:8]}",
-                        )
-                        shielded_task = asyncio.shield(core_api_task)
-                        api_call_tasks_unshielded.append(core_api_task)
-                        api_call_tasks_shielded.append(shielded_task)
-                        all_tasks_to_wait.append(core_api_task)
-
-                    disconnect_monitor_task = asyncio.create_task(
-                        check_client_disconnect(
-                            http_request,
-                            f"fake-stream-orchestrator-{cache_key[:8]}",
-                            "fake-stream-orchestrator",
-                            chat_request.model,
-                        ),
-                        name=f"VertexDisconnectMonitorFakeStream-{cache_key[:8]}",
-                    )
-                    all_tasks_to_wait.append(disconnect_monitor_task)
-
-                    pending_tasks = all_tasks_to_wait[:]
-                    first_successful_result: Optional[VertexCachedResponse] = None
-
-                    while pending_tasks and not winner_found:
-                        done, pending = await asyncio.wait(
-                            pending_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        pending_tasks = list(pending)
-
-                        for task in done:
-                            if winner_found:
-                                continue
-
-                            if task is disconnect_monitor_task:
-                                winner_found = True
-                                log(
-                                    "warning",
-                                    "假流式编排器: 客户端断开连接",
-                                    extra=log_extra,
-                                )
-                                if not main_orchestration_future.done():  # Reverted
-                                    main_orchestration_future.set_exception(
-                                        HTTPException(
-                                            status_code=499, detail="客户端断开连接"
-                                        )
-                                    )
-                                if (
-                                    api_call_tasks_shielded
-                                    and not background_cache_triggered
-                                ):
-                                    log(
-                                        "info",
-                                        "假流式编排器: 客户端断开，触发所有任务的后台缓存",
-                                        extra=log_extra,
-                                    )
-                                    asyncio.create_task(
-                                        _await_and_cache_background_fake_calls(
-                                            shielded_tasks=api_call_tasks_shielded,
-                                            cache_key=cache_key,
-                                            response_cache_manager=response_cache_manager,
-                                            log_extra_base=log_extra_base,
-                                        )
-                                    )
-                                    background_cache_triggered = True
-                                break  # 已处理首个事件，退出内层循环
-
-                            elif task in api_call_tasks_unshielded:
-                                try:
-                                    result = task.result()
-                                    if (
-                                        isinstance(result, VertexCachedResponse)
-                                        and result.text
-                                    ):
-                                        winner_found = True
-                                        winner_task_ref = (
-                                            task  # Store reference to winning task
-                                        )
-                                        first_successful_result = result
-                                        log(
-                                            "info",
-                                            "假流式编排器: 收到首个成功响应",
-                                            extra=log_extra,
-                                        )
-
-                                        # 设置主 Future 结果
-                                        if not main_orchestration_future.done():
-                                            main_orchestration_future.set_result(
-                                                first_successful_result
-                                            )
-
-                                        # 取消其他非获胜的 unshielded API 任务和断开监控
-                                        cancelled_count = 0
-                                        for other_task in api_call_tasks_unshielded:
-                                            if (
-                                                other_task is not task
-                                                and not other_task.done()
-                                            ):
-                                                other_task.cancel()
-                                                cancelled_count += 1
-                                        if (
-                                            disconnect_monitor_task
-                                            and not disconnect_monitor_task.done()
-                                        ):
-                                            disconnect_monitor_task.cancel()
-                                            cancelled_count += 1
-                                        log(
-                                            "info",
-                                            f"假流式编排器: 已取消 {cancelled_count} 个剩余前台任务",
-                                            extra=log_extra,
-                                        )
-
-                                        # 触发后台缓存任务 (包含所有 shielded 任务)
-                                        if (
-                                            api_call_tasks_shielded
-                                            and not background_cache_triggered
-                                        ):
-                                            log(
-                                                "info",
-                                                "假流式编排器: 触发所有任务的后台缓存",
-                                                extra=log_extra,
-                                            )
-                                            asyncio.create_task(
-                                                _await_and_cache_background_fake_calls(
-                                                    shielded_tasks=api_call_tasks_shielded,
-                                                    cache_key=cache_key,
-                                                    response_cache_manager=response_cache_manager,
-                                                    log_extra_base=log_extra_base,
-                                                )
-                                            )
-                                            background_cache_triggered = True
-                                        break  # 已处理首个事件，退出内层循环
-                                    elif isinstance(result, VertexCachedResponse):
-                                        log(
-                                            "debug",
-                                            "假流式编排器: API 调用成功但响应为空",
-                                            extra=log_extra,
-                                        )
-                                    else:  # result is None or Exception
-                                        log(
-                                            "warning",
-                                            f"假流式编排器: API 调用失败或被取消: {result}",
-                                            extra=log_extra,
-                                        )
-
-                                except asyncio.CancelledError:
-                                    log(
-                                        "info",
-                                        "假流式编排器: API 任务被取消",
-                                        extra=log_extra,
-                                    )
-                                except Exception as task_exc:
-                                    log(
-                                        "error",
-                                        f"假流式编排器: API 任务执行时发生错误: {task_exc}",
-                                        exc_info=True,
-                                        extra=log_extra,
-                                    )
-
-                except Exception as orch_exc:
+                else:
                     log(
                         "error",
-                        f"假流式编排器发生意外错误: {orch_exc}",
-                        exc_info=True,
+                        "注册 Vertex Future 失败且无法获取有效的现有 Future",
                         extra=log_extra,
                     )
-                    if not main_orchestration_future.done():
-                        main_orchestration_future.set_exception(orch_exc)
-                finally:
-                    # 确保即使编排器异常退出，后台缓存也能在可能的情况下启动
-                    if api_call_tasks_shielded and not background_cache_triggered:
+                    raise HTTPException(
+                        status_code=500, detail="服务器内部状态管理冲突"
+                    )
+
+            # 只有成功注册 Future 的请求才执行编排器逻辑
+            if we_created_the_future:
+
+                async def _orchestrator():
+                    api_call_tasks_unshielded = []
+                    api_call_tasks_shielded = []
+                    disconnect_monitor_task = None
+                    all_tasks_to_wait = []
+                    winner_found = False
+                    background_cache_triggered = False
+                    winner_task_ref = None
+
+                    try:
+                        openai_messages = [
+                            OpenAIMessage(role=m.role, content=m.content)
+                            for m in chat_request.messages
+                        ]
+                        vertex_request_payload = OpenAIRequest(
+                            model=chat_request.model,
+                            messages=openai_messages,
+                            stream=False,
+                            temperature=chat_request.temperature,
+                            max_tokens=chat_request.max_tokens,
+                            top_p=chat_request.top_p,
+                            top_k=chat_request.top_k,
+                            stop=chat_request.stop,
+                            presence_penalty=chat_request.presence_penalty,
+                            frequency_penalty=chat_request.frequency_penalty,
+                            seed=getattr(chat_request, "seed", None),
+                            n=chat_request.n,
+                        )
+
+                        num_concurrent_requests = settings.CONCURRENT_REQUESTS
                         log(
-                            "warning",
-                            "假流式编排器: 异常退出，尝试触发后台缓存",
+                            "info",
+                            f"假流式编排器: 发起 {num_concurrent_requests} 个并发 API 调用",
                             extra=log_extra,
                         )
-                        asyncio.create_task(
-                            _await_and_cache_background_fake_calls(
-                                shielded_tasks=api_call_tasks_shielded,
-                                cache_key=cache_key,
-                                response_cache_manager=response_cache_manager,
-                                log_extra_base=log_extra_base,
+
+                        for i in range(num_concurrent_requests):
+                            core_api_task = asyncio.create_task(
+                                _execute_single_fake_vertex_call(
+                                    chat_request=chat_request,
+                                    vertex_request_payload=vertex_request_payload,
+                                    call_index=i + 1,
+                                    log_extra_base=log_extra_base,
+                                ),
+                                name=f"VertexFakeStreamCore-{i + 1}-{cache_key[:8]}",
                             )
+                            shielded_task = asyncio.shield(core_api_task)
+                            api_call_tasks_unshielded.append(core_api_task)
+                            api_call_tasks_shielded.append(shielded_task)
+                            all_tasks_to_wait.append(core_api_task)
+
+                        disconnect_monitor_task = asyncio.create_task(
+                            check_client_disconnect(
+                                http_request,
+                                f"fake-stream-orchestrator-{cache_key[:8]}",
+                                "fake-stream-orchestrator",
+                                chat_request.model,
+                            ),
+                            name=f"VertexDisconnectMonitorFakeStream-{cache_key[:8]}",
                         )
-                    # 清理活跃请求池中的编排器任务本身 (如果它是由当前请求创建的)
-                    # 注意：Future 本身不在此处移除，它由等待它的请求处理或超时逻辑处理
-                    # if is_new_future: # This logic needs refinement based on how orchestrator task is awaited
-                    #     active_requests_manager.remove(f"orchestrator_task:{cache_key}") # Example key
+                        all_tasks_to_wait.append(disconnect_monitor_task)
 
-            # --- 启动编排器任务 (如果需要) ---
-            orchestrator_task = None
-            if is_new_future:  # Check if we created the future
-                orchestrator_task = asyncio.create_task(_orchestrator())
-                # Optionally register the orchestrator task itself if needed elsewhere
-                # active_requests_manager.add(f"orchestrator_task:{cache_key}", orchestrator_task)
+                        pending_tasks = all_tasks_to_wait[:]
+                        first_successful_result: Optional[VertexCachedResponse] = None
 
-            # --- 等待 Future (由编排器设置) ---
+                        while pending_tasks and not winner_found:
+                            done, pending = await asyncio.wait(
+                                pending_tasks, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            pending_tasks = list(pending)
+
+                            for task in done:
+                                if winner_found:
+                                    continue
+
+                                if task is disconnect_monitor_task:
+                                    winner_found = True
+                                    log(
+                                        "warning",
+                                        "假流式编排器: 客户端断开连接",
+                                        extra=log_extra,
+                                    )
+                                    if not main_orchestration_future.done():
+                                        main_orchestration_future.set_exception(
+                                            HTTPException(
+                                                status_code=499, detail="客户端断开连接"
+                                            )
+                                        )
+                                    cancelled_count = 0
+                                    for utask in api_call_tasks_unshielded:
+                                        if not utask.done():
+                                            utask.cancel()
+                                            cancelled_count += 1
+                                    log(
+                                        "info",
+                                        f"假流式编排器: 取消了 {cancelled_count} 个未完成的 API 调用",
+                                        extra=log_extra,
+                                    )
+                                    if api_call_tasks_shielded:
+                                        background_cache_triggered = True
+                                        asyncio.create_task(
+                                            _await_and_cache_background_fake_calls(
+                                                shielded_tasks=api_call_tasks_shielded,
+                                                cache_key=cache_key,
+                                                response_cache_manager=response_cache_manager,
+                                                log_extra_base=log_extra_base,
+                                            )
+                                        )
+                                    break
+
+                                elif task in api_call_tasks_unshielded:
+                                    try:
+                                        result = task.result()
+                                        if (
+                                            isinstance(result, VertexCachedResponse)
+                                            and result.text
+                                        ):
+                                            winner_found = True
+                                            first_successful_result = result
+                                            winner_task_ref = task
+                                            log(
+                                                "info",
+                                                "假流式编排器: 收到首个成功响应",
+                                                extra=log_extra,
+                                            )
+                                            if not main_orchestration_future.done():
+                                                main_orchestration_future.set_result(
+                                                    first_successful_result
+                                                )
+                                            if (
+                                                disconnect_monitor_task
+                                                and not disconnect_monitor_task.done()
+                                            ):
+                                                disconnect_monitor_task.cancel()
+                                            cancelled_count = 0
+                                            for utask in api_call_tasks_unshielded:
+                                                if (
+                                                    utask is not task
+                                                    and not utask.done()
+                                                ):
+                                                    utask.cancel()
+                                                    cancelled_count += 1
+                                            log(
+                                                "info",
+                                                f"假流式编排器: 取消了 {cancelled_count} 个其他未完成的 API 调用",
+                                                extra=log_extra,
+                                            )
+                                            remaining_shielded = [
+                                                st
+                                                for st in api_call_tasks_shielded
+                                                if asyncio.ensure_future(st)
+                                                is not asyncio.ensure_future(
+                                                    winner_task_ref
+                                                )
+                                            ]
+                                            if remaining_shielded:
+                                                background_cache_triggered = True
+                                                asyncio.create_task(
+                                                    _await_and_cache_background_fake_calls(
+                                                        shielded_tasks=remaining_shielded,
+                                                        cache_key=cache_key,
+                                                        response_cache_manager=response_cache_manager,
+                                                        log_extra_base=log_extra_base,
+                                                    )
+                                                )
+                                            break
+                                        elif isinstance(result, VertexCachedResponse):
+                                            log(
+                                                "debug",
+                                                "假流式编排器: 收到空响应，继续等待",
+                                                extra=log_extra,
+                                            )
+                                        else:
+                                            log(
+                                                "warning",
+                                                f"假流式编排器: API 调用失败或返回 None: {result}",
+                                                extra=log_extra,
+                                            )
+                                    except asyncio.CancelledError:
+                                        log(
+                                            "debug",
+                                            "假流式编排器: 一个 API 调用任务被取消",
+                                            extra=log_extra,
+                                        )
+                                    except Exception as task_exc:
+                                        log(
+                                            "error",
+                                            f"假流式编排器: API 调用任务异常: {task_exc}",
+                                            extra=log_extra,
+                                        )
+
+                        if not winner_found:
+                            log(
+                                "warning",
+                                "假流式编排器: 所有 API 调用均未成功且客户端未断开",
+                                extra=log_extra,
+                            )
+                            if not main_orchestration_future.done():
+                                main_orchestration_future.set_exception(
+                                    HTTPException(
+                                        status_code=500,
+                                        detail="无法从 Vertex 获取有效响应",
+                                    )
+                                )
+                            if (
+                                not background_cache_triggered
+                                and api_call_tasks_shielded
+                            ):
+                                asyncio.create_task(
+                                    _await_and_cache_background_fake_calls(
+                                        shielded_tasks=api_call_tasks_shielded,
+                                        cache_key=cache_key,
+                                        response_cache_manager=response_cache_manager,
+                                        log_extra_base=log_extra_base,
+                                    )
+                                )
+
+                    except Exception as orch_exc:
+                        log(
+                            "error",
+                            f"假流式编排器发生意外错误: {orch_exc}",
+                            exc_info=True,
+                            extra=log_extra,
+                        )
+                        if not main_orchestration_future.done():
+                            main_orchestration_future.set_exception(
+                                HTTPException(
+                                    status_code=500, detail=f"编排器错误: {orch_exc}"
+                                )
+                            )
+                    finally:
+                        if (
+                            disconnect_monitor_task
+                            and not disconnect_monitor_task.done()
+                        ):
+                            disconnect_monitor_task.cancel()
+                        log("debug", "假流式编排器任务结束", extra=log_extra)
+
+                # 启动编排器 (仅当是创建者时)
+                orchestration_task = asyncio.create_task(_orchestrator())
+
+            # --- 等待并产生首个结果 (所有请求都执行此部分) ---
             try:
                 final_result = await asyncio.wait_for(
                     main_orchestration_future, timeout=settings.REQUEST_TIMEOUT + 5
-                )  # Add buffer
+                )  # 增加缓冲
 
                 if isinstance(final_result, VertexCachedResponse):
-                    yield openAI_stream_chunk(
-                        model=final_result.model,
-                        content=final_result.text,
-                        finish_reason="stop",
+                    log("info", "假流式: 成功从编排器 Future 获取结果", extra=log_extra)
+                    try:
+                        yield openAI_from_Gemini(final_result, stream=True)
+                    except GeneratorExit:
+                        log(
+                            "warning",
+                            "假流式 Future 成功后 yield 时客户端断开连接",
+                            extra=log_extra,
+                        )
+                        raise
+                    except Exception as e_yield_final:
+                        log(
+                            "error",
+                            f"假流式 Future 成功后 yield 时出错: {e_yield_final}",
+                            extra=log_extra,
+                        )
+                        raise
+                elif isinstance(final_result, Exception):
+                    # 如果 Future 结果是异常
+                    log(
+                        "error",
+                        f"假流式编排器 Future 完成但带有异常: {final_result}",
+                        extra=log_extra,
                     )
+                    raise final_result  # 重新抛出异常
                 else:
-                    # Should not happen if future is set correctly
-                    yield openAI_stream_chunk(
-                        model=chat_request.model,
-                        content=f"错误：内部状态错误 (Future 结果类型: {type(final_result)})",
-                        finish_reason="error",
+                    # Future 完成但结果类型未知
+                    log(
+                        "error",
+                        f"假流式编排器 Future 返回意外类型: {type(final_result)}",
+                        extra=log_extra,
                     )
+                    yield openAI_from_Gemini(
+                        model=chat_request.model,
+                        content="错误：服务器内部状态错误",
+                        finish_reason="error",
+                        stream=True,
+                    )
+
             except asyncio.TimeoutError:
                 log("error", "等待假流式编排器 Future 超时", extra=log_extra)
-                yield openAI_stream_chunk(
+                yield openAI_from_Gemini(
                     model=chat_request.model,
                     content="错误：处理请求超时",
                     finish_reason="error",
+                    stream=True,
                 )
+            except HTTPException as http_exc:
+                # 重新抛出由编排器设置的 HTTPException (如客户端断开)
+                log(
+                    "warning",
+                    f"假流式编排器 Future 引发 HTTPException: {http_exc.status_code} {http_exc.detail}",
+                    extra=log_extra,
+                )
+                # 对于 499 Client Closed Request，不应再 yield
+                if http_exc.status_code != 499:
+                    try:
+                        yield openAI_from_Gemini(
+                            model=chat_request.model,
+                            content=f"错误: {http_exc.detail}",
+                            finish_reason="error",
+                            stream=True,
+                        )
+                    except Exception as e_yield_http_err:
+                        log(
+                            "error",
+                            f"假流式发送 HTTPException 错误块时出错: {e_yield_http_err}",
+                            extra=log_extra,
+                        )
+                raise http_exc  # 重新抛出原始异常
             except Exception as final_exc:
                 log(
                     "error",
@@ -684,30 +836,22 @@ async def process_vertex_stream_request(
                     exc_info=True,
                     extra=log_extra,
                 )
-                # Check if it's the specific client disconnect exception
-                status_code = getattr(final_exc, "status_code", 500)
-                detail = getattr(
-                    final_exc,
-                    "detail",
-                    f"处理请求时发生内部错误 ({type(final_exc).__name__})",
+                yield openAI_from_Gemini(
+                    model=chat_request.model,
+                    content=f"错误：处理请求时发生内部错误 ({type(final_exc).__name__})",
+                    finish_reason="error",
+                    stream=True,
                 )
-                if status_code == 499:
-                    log(
-                        "warning", "假流式 Future 结果为客户端断开连接", extra=log_extra
-                    )
-                    # Don't yield error chunk if client disconnected
-                else:
-                    yield openAI_stream_chunk(
-                        model=chat_request.model,
-                        content=f"错误: {detail}",
-                        finish_reason="error",
-                    )
+            finally:
+                # 无论如何，如果此请求创建了 Future，则在完成后移除 (或设置 TTL)
+                # if we_created_the_future: active_requests_manager.remove(orchestrator_pool_key) # 暂时不移除
+                pass
         else:
-            # --- True Streaming Logic ---
+            # --- 真流式处理逻辑 ---
             log_extra = {**log_extra_base, "request_type": "vertex-true-stream"}
             log("info", "Vertex 请求进入真流式处理模式", extra=log_extra)
 
-            # 1. Cache Check (True Stream)
+            # 1. 优先检查缓存 (如果命中且类型正确，获取并移除，然后以流式返回)
             cached_response, cache_hit = response_cache_manager.get_and_remove(
                 cache_key
             )
@@ -718,12 +862,15 @@ async def process_vertex_stream_request(
                     extra=log_extra,
                 )
                 try:
-                    yield openAI_stream_chunk(
-                        model=cached_response.model,
-                        content=cached_response.text,
-                        finish_reason="stop",
+                    yield openAI_from_Gemini(cached_response, stream=True)
+                    return
+                except GeneratorExit:
+                    log(
+                        "warning",
+                        "真流式缓存命中后 yield 时客户端断开连接",
+                        extra=log_extra,
                     )
-                    return  # Cache hit, stream complete
+                    raise
                 except Exception as e_yield:
                     log(
                         "error",
@@ -734,268 +881,95 @@ async def process_vertex_stream_request(
             elif cache_hit:
                 log(
                     "warning",
-                    f"真流式缓存命中但类型不符 (期望 VertexCachedResponse, 得到 {type(cached_response)})，已移除错误项，视为缓存未命中",
+                    f"缓存命中但类型不符 (期望 VertexCachedResponse, 得到 {type(cached_response)})，已移除错误项，视为缓存未命中",
                     extra=log_extra,
                 )
 
-            # 2. Future Handling (True Stream)
-            orchestrator_pool_key = f"vertex_orchestrator:{cache_key}"
-            future_to_wait_for: Optional[asyncio.Future] = None
-            we_created_the_future = False
-            main_stream_future: Optional[asyncio.Future] = (
-                None  # Define main_stream_future here
+            # 2. 检查是否有相同请求正在处理 (Future check) - 真流式简化处理，不等待 Future
+            log(
+                "info",
+                "真流式: 缓存未命中，准备启动新的 Vertex 流式调用",
+                extra=log_extra,
             )
 
-            # Try to get existing future first
-            existing_future = active_requests_manager.get(orchestrator_pool_key)
-            if (
-                isinstance(existing_future, asyncio.Future)
-                and not existing_future.done()
-            ):
-                log(
-                    "info", "发现相同真流式请求进行中，将等待其 Future", extra=log_extra
-                )
-                future_to_wait_for = existing_future
-            else:
-                # No existing future, or it's already done. Try to create and add ours.
-                log(
-                    "info",
-                    "未发现相同真流式请求进行中，尝试创建新 Future",
-                    extra=log_extra,
-                )
-                main_stream_future = asyncio.Future()  # Assign to main_stream_future
-                if active_requests_manager.add(
-                    orchestrator_pool_key, main_stream_future
-                ):
-                    log("info", "成功注册新的 Future", extra=log_extra)
-                    we_created_the_future = True
-                    # We don't wait for our own future here, we proceed to execute the task
-                else:
-                    # Race condition: another request added the future between our get and add.
-                    log(
-                        "warning",
-                        f"真流式：尝试注册 Future 时发现键已存在 (race condition): {orchestrator_pool_key}",
-                        extra=log_extra,
-                    )
-                    existing_future_retry = active_requests_manager.get(
-                        orchestrator_pool_key
-                    )
-                    if (
-                        isinstance(existing_future_retry, asyncio.Future)
-                        and not existing_future_retry.done()
-                    ):
-                        log(
-                            "info",
-                            "真流式：使用刚刚由并发请求创建的 Future (race condition)",
-                            extra=log_extra,
+            # --- 内部类：用于累积真流式响应信息 ---
+            class TrueStreamAccumulator:
+                def __init__(self, model_name):
+                    self.model = model_name
+                    self.text = ""
+                    self.prompt_token_count = 0
+                    self.candidates_token_count = 0
+                    self.total_token_count = 0
+                    self.finish_reason = None
+                    self.function_call = None  # 暂存函数调用信息
+
+                def update_from_chunk(self, chunk_data: dict):
+                    """根据 Vertex 流块更新累积器状态"""
+                    choices = chunk_data.get("choices", [])
+                    if not choices:
+                        return False  # 无效块
+
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        self.text += content  # 累积文本
+
+                    # 解析函数调用 (如果存在)
+                    tool_calls = delta.get("tool_calls")
+                    if tool_calls:
+                        # 假设 Vertex 的 tool_calls 结构与 OpenAI 类似或需要转换
+                        # TODO: 需要根据 Vertex 实际返回调整
+                        if not self.function_call:
+                            self.function_call = []
+                        for tc in tool_calls:
+                            self.function_call.append(tc.get("function"))
+
+                    # 解析 finishReason (Vertex 使用)
+                    chunk_finish_reason = choices[0].get("finishReason")
+                    if chunk_finish_reason:
+                        self.finish_reason = chunk_finish_reason
+
+                    # 解析 token 计数 (如果 Vertex 流式提供)
+                    usage_metadata = chunk_data.get("usageMetadata")
+                    if usage_metadata:
+                        self.prompt_token_count = usage_metadata.get(
+                            "promptTokenCount", self.prompt_token_count
                         )
-                        future_to_wait_for = existing_future_retry
-                    else:
-                        # This case is problematic - add failed, but get also failed or got a completed future.
-                        log(
-                            "error",
-                            "真流式：注册 Future 失败且无法获取有效的现有 Future",
-                            extra=log_extra,
+                        self.candidates_token_count = usage_metadata.get(
+                            "candidatesTokenCount", self.candidates_token_count
                         )
-                        raise HTTPException(
-                            status_code=500, detail="内部服务器错误：请求状态管理冲突"
+                        self.total_token_count = usage_metadata.get(
+                            "totalTokenCount", self.total_token_count
                         )
 
-            # If we determined there's a future to wait for (either initially found or from race condition)
-            if future_to_wait_for:
-                # --- Polling Waiting Logic ---
-                log("info", "开始轮询等待现有 Future (带保活)", extra=log_extra)
-                start_time = time.monotonic()  # Use monotonic clock for timeout
-                polling_interval = 0.1  # Seconds between checks
-                try:
-                    yield openAI_stream_chunk(
-                        model=chat_request.model, content=""
-                    )  # Initial keep-alive
+                    return True  # 表示块被处理
 
-                    while True:
-                        if future_to_wait_for.done():
-                            log("info", "轮询：检测到 Future 已完成", extra=log_extra)
-                            break  # Exit loop, future is done
+                def create_final_response_obj(self) -> VertexCachedResponse:
+                    """创建最终的响应对象，用于缓存"""
+                    openai_finish_reason = "stop"  # 默认值
+                    if self.finish_reason == "STOP":
+                        openai_finish_reason = "stop"
+                    elif self.finish_reason == "MAX_TOKENS":
+                        openai_finish_reason = "length"
+                    elif self.finish_reason == "SAFETY":
+                        openai_finish_reason = "content_filter"
+                    # 其他原因映射...
 
-                        # Check for overall timeout
-                        if time.monotonic() - start_time > settings.REQUEST_TIMEOUT:
-                            log("warning", "轮询等待现有 Future 超时", extra=log_extra)
-                            raise asyncio.TimeoutError(
-                                "Polling timeout waiting for existing future"
-                            )
-
-                        # Yield keep-alive and sleep
-                        try:
-                            yield openAI_stream_chunk(
-                                model=chat_request.model, content=""
-                            )
-                        except GeneratorExit:
-                            log(
-                                "warning",
-                                "轮询等待时，keep-alive yield 发生 GeneratorExit",
-                                extra=log_extra,
-                            )
-                            # Don't try to cancel future here, let original request handle it
-                            raise  # Re-raise to stop
-
-                        await asyncio.sleep(polling_interval)
-
-                    # --- Future is Done ---
-                    log("debug", "轮询结束，处理 Future 结果", extra=log_extra)
-                    future_exception = future_to_wait_for.exception()
-                    if future_exception is None:
-                        # Future completed successfully, try getting result from cache
-                        log(
-                            "info",
-                            "轮询：Future 成功完成，尝试从缓存获取结果",
-                            extra=log_extra,
-                        )
-                        # Use get() instead of get_and_remove() here, let original request manage removal? Or remove here too?
-                        # Let's try removing here for consistency, assuming the waiting request "consumes" the result.
-                        cached_result, cache_hit_after_wait = (
-                            response_cache_manager.get_and_remove(cache_key)
-                        )
-                        if cache_hit_after_wait and isinstance(
-                            cached_result, VertexCachedResponse
-                        ):
-                            log("info", "轮询：成功从缓存获取结果", extra=log_extra)
-                            yield openAI_stream_chunk(
-                                model=cached_result.model,
-                                content=cached_result.text,
-                                finish_reason="stop",
-                            )
-                        elif cache_hit_after_wait:
-                            log(
-                                "warning",
-                                f"轮询：缓存命中但类型错误 ({type(cached_result)})，视为失败",
-                                extra=log_extra,
-                            )
-                            yield openAI_stream_chunk(
-                                model=chat_request.model,
-                                content="错误：并发请求状态异常 (缓存类型错误)",
-                                finish_reason="error",
-                            )
-                        else:
-                            # This might happen if the original request failed after setting future but before caching?
-                            log(
-                                "error",
-                                "轮询：Future 成功但缓存未命中!",
-                                extra=log_extra,
-                            )
-                            yield openAI_stream_chunk(
-                                model=chat_request.model,
-                                content="错误：并发请求状态异常 (缓存未命中)",
-                                finish_reason="error",
-                            )
-                    else:
-                        # Future completed with an exception
-                        log(
-                            "error",
-                            f"轮询：Future 完成但带有异常: {type(future_exception).__name__}",
-                            extra=log_extra,
-                        )
-                        raise future_exception  # Re-raise the exception
-
-                    return  # Exit generator, future handled
-
-                except asyncio.TimeoutError:
-                    # Handle polling timeout
-                    log(
-                        "warning",
-                        "轮询等待现有真流式任务 Future 超时 (捕获)",
-                        extra=log_extra,
+                    return VertexCachedResponse(
+                        text=self.text,
+                        model=self.model,
+                        prompt_token_count=self.prompt_token_count,
+                        candidates_token_count=self.candidates_token_count,
+                        total_token_count=self.total_token_count,
+                        finish_reason=openai_finish_reason,
+                        function_call=self.function_call,
                     )
-                    yield openAI_stream_chunk(
-                        model=chat_request.model,
-                        content="错误：等待并发请求超时",
-                        finish_reason="error",
-                    )
-                    return  # Exit generator on timeout
-                except asyncio.CancelledError:
-                    log(
-                        "warning",
-                        "轮询等待现有真流式任务 Future 时被取消",
-                        extra=log_extra,
-                    )
-                    raise  # Re-raise cancellation to stop the stream properly
-                except Exception as e:
-                    # Handle exceptions raised by future.exception() or other issues
-                    log(
-                        "error",
-                        f"轮询等待现有真流式任务 Future 时发生错误: {e}",
-                        extra=log_extra,
-                    )
-                    yield openAI_stream_chunk(
-                        model=chat_request.model,
-                        content=f"错误：等待并发请求时出错 ({type(e).__name__})",
-                        finish_reason="error",
-                    )
-                    return  # Exit generator on other errors
-                # --- End Polling Waiting Logic ---
 
-            # 3. Execute New True Streaming Task (only if we created the future)
-            if not we_created_the_future:
-                # If we ended up waiting for another future, we should have returned already.
-                # If we are here without creating a future, something went wrong in the logic above.
-                log(
-                    "error",
-                    "真流式：逻辑错误，未创建 Future 但也未等待现有 Future",
-                    extra=log_extra,
-                )
-                raise HTTPException(
-                    status_code=500, detail="内部服务器错误：流处理逻辑错误"
-                )
-
-            # Ensure main_stream_future is assigned if we created it
-            if main_stream_future is None:
-                log(
-                    "error",
-                    "真流式：逻辑错误，we_created_the_future is True 但 main_stream_future is None",
-                    extra=log_extra,
-                )
-                raise HTTPException(
-                    status_code=500, detail="内部服务器错误：流处理状态错误"
-                )
-
-            # ADDED LOG: Confirming execution path for the first request
-            log("debug", "真流式：作为创建者，准备执行流式调用", extra=log_extra)
-
-            log("info", "Vertex 真流式请求：执行新的流式 API 调用", extra=log_extra)
-            # The future 'main_stream_future' is the one we added successfully.
-
-            # Prepare API Payload (True Stream)
-            openai_messages = [
-                OpenAIMessage(role=m.role, content=m.content)
-                for m in chat_request.messages
-            ]
-            vertex_request_payload = OpenAIRequest(
-                model=chat_request.model,
-                messages=openai_messages,
-                stream=True,  # Ensure stream=True
-                temperature=chat_request.temperature,
-                max_tokens=chat_request.max_tokens,
-                top_p=chat_request.top_p,
-                top_k=chat_request.top_k,
-                stop=chat_request.stop,
-                presence_penalty=chat_request.presence_penalty,
-                frequency_penalty=chat_request.frequency_penalty,
-                seed=getattr(chat_request, "seed", None),
-                n=chat_request.n,  # Note: True streaming might handle n differently or only support n=1 effectively
-            )
-
-            # 3c. Client Disconnect Monitor & API Call Execution
-            disconnect_monitor_task = None
-            api_stream_generator: Optional[AsyncGenerator] = None
-            full_response_text = ""
-            total_tokens_from_stream = (
-                0  # Placeholder for potential future token counting from stream
-            )
-            stream_successful = False
-            error_occurred = None
-
-            # ADDED LOG: Before the main try block
-            log("debug", "真流式：即将进入主 try/finally 块", extra=log_extra)
+            # --- 调用 Vertex 流式 API ---
+            accumulator = TrueStreamAccumulator(chat_request.model)
+            disconnect_monitor_task = None  # 初始化
             try:
+                # 启动客户端断开连接监控
                 disconnect_monitor_task = asyncio.create_task(
                     check_client_disconnect(
                         http_request,
@@ -1007,304 +981,193 @@ async def process_vertex_stream_request(
                 )
 
                 log(
-                    "debug",
-                    "真流式：即将调用 vertex_chat_completions_impl",
+                    "info",
+                    "真流式: 调用 Vertex chat_completions (stream=True)",
                     extra=log_extra,
-                )  # Existing LOG
-                api_stream_generator = await vertex_chat_completions_impl(
+                )
+                # 准备请求体
+                openai_messages = [
+                    OpenAIMessage(role=m.role, content=m.content)
+                    for m in chat_request.messages
+                ]
+                vertex_request_payload = OpenAIRequest(
+                    model=chat_request.model,
+                    messages=openai_messages,
+                    stream=True,
+                    temperature=chat_request.temperature,
+                    max_tokens=chat_request.max_tokens,
+                    top_p=chat_request.top_p,
+                    top_k=chat_request.top_k,
+                    stop=chat_request.stop,
+                    # TODO: 传递 safety_settings / safety_settings_g2 (如果 Vertex 实现支持)
+                )
+
+                # 获取 Vertex API 的异步生成器
+                vertex_stream = await vertex_chat_completions_impl(
                     vertex_request_payload
                 )
-                log(
-                    "debug",
-                    f"真流式：vertex_chat_completions_impl 调用返回，类型: {type(api_stream_generator)}",
-                    extra=log_extra,
-                )  # Existing LOG
 
-                # Check if the generator is valid before iterating
-                if not isinstance(api_stream_generator, AsyncGenerator):
+                # 检查返回类型
+                if not isinstance(vertex_stream, AsyncGenerator):
                     log(
                         "error",
-                        f"Vertex API 调用未返回预期的 AsyncGenerator，而是 {type(api_stream_generator)}",
+                        f"Vertex API 调用未返回预期的 AsyncGenerator，而是 {type(vertex_stream)}",
                         extra=log_extra,
                     )
-                    # Handle cases where the underlying call might return an error response directly
-                    if isinstance(
-                        api_stream_generator, (JSONResponse, dict, Exception)
-                    ):
-                        # Attempt to extract error details if possible
-                        error_detail = str(api_stream_generator)
-                        if isinstance(api_stream_generator, JSONResponse):
-                            try:
-                                error_detail = api_stream_generator.body.decode()
-                            except:
-                                pass
-                        elif isinstance(api_stream_generator, dict):
-                            error_detail = json.dumps(api_stream_generator)
+                    raise TypeError(
+                        f"Vertex API call returned unexpected type: {type(vertex_stream)}"
+                    )
 
-                        yield openAI_stream_chunk(
-                            model=chat_request.model,
-                            content=f"错误：API 调用失败 ({error_detail})",
-                            finish_reason="error",
-                        )
-                        error_occurred = Exception(f"API call failed: {error_detail}")
-                    else:
-                        yield openAI_stream_chunk(
-                            model=chat_request.model,
-                            content="错误：API 调用返回意外类型",
-                            finish_reason="error",
-                        )
-                        error_occurred = TypeError("API call returned unexpected type")
-                    # Ensure future is handled correctly on early exit
-                    # Check if main_stream_future exists before using it
-                    if main_stream_future and not main_stream_future.done():
-                        main_stream_future.set_exception(
-                            error_occurred or Exception("Unknown API call failure")
-                        )
-                    active_requests_manager.remove(
-                        orchestrator_pool_key
-                    )  # Clean up future
-                    return  # Stop processing
-
-                # 3d. Iterate, Yield, Accumulate
-                log(
-                    "debug",
-                    "真流式：准备进入 API stream generator 迭代",
-                    extra=log_extra,
-                )  # Existing LOG
-                chunk_count = 0  # Existing LOG
-                async for chunk_str in api_stream_generator:
-                    chunk_count += 1  # Existing LOG
-                    log(
-                        "debug", f"真流式：收到块 #{chunk_count}", extra=log_extra
-                    )  # Existing LOG
-                    # Check for disconnect before yielding
+                # 迭代处理 Vertex 返回的流块
+                async for chunk_str in vertex_stream:
                     if disconnect_monitor_task.done():
-                        client_disconnected_result = (
-                            disconnect_monitor_task.result()
-                        )  # Check if it was a disconnect
-                        if client_disconnected_result is True:
+                        if disconnect_monitor_task.result() is True:
                             log(
                                 "warning",
                                 "真流式：客户端在流传输过程中断开连接",
                                 extra=log_extra,
                             )
-                            error_occurred = asyncio.CancelledError(
+                            raise asyncio.CancelledError(
                                 "Client disconnected during stream"
                             )
-                            break  # Exit the loop
+
+                    if not chunk_str or not chunk_str.startswith("data: "):
+                        continue
 
                     try:
-                        yield chunk_str  # Yield the raw chunk from vertex.py
-                        # Attempt to parse the chunk to accumulate text (assuming OpenAI SSE format)
-                        try:
-                            # Chunks are like "data: {...}\n\n"
-                            if chunk_str.startswith("data: "):
-                                json_part = chunk_str[len("data: ") :].strip()
-                                if json_part and json_part != "[DONE]":
-                                    chunk_data = json.loads(json_part)
-                                    choices = chunk_data.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content = delta.get("content")
-                                        if content:
-                                            full_response_text += content
-                        except json.JSONDecodeError:
-                            log(
-                                "warning",
-                                f"真流式：无法解析流块以累积文本: {chunk_str[:100]}...",
-                                extra=log_extra,
-                            )
-                        except Exception as parse_exc:
-                            log(
-                                "error",
-                                f"真流式：解析或累积流块时出错: {parse_exc}",
-                                extra=log_extra,
-                            )
+                        chunk_data = json.loads(chunk_str[len("data: ") :])
+                    except json.JSONDecodeError:
+                        log(
+                            "error",
+                            f"真流式: 解析 JSON 块失败: {chunk_str[:100]}...",
+                            extra=log_extra,
+                        )
+                        continue
 
+                    if not accumulator.update_from_chunk(chunk_data):
+                        continue
+
+                    # --- 格式化并 Yield OpenAI 块 ---
+                    choices = chunk_data.get("choices", [])
+                    delta_to_yield = {}
+                    finish_reason_to_yield = None
+                    usage_to_yield = None
+
+                    if choices:
+                        delta_to_yield = choices[0].get("delta", {})
+                        finish_reason_to_yield = choices[0].get("finishReason")
+                        if finish_reason_to_yield == "STOP":
+                            finish_reason_to_yield = "stop"
+                        elif finish_reason_to_yield == "MAX_TOKENS":
+                            finish_reason_to_yield = "length"
+                        elif finish_reason_to_yield == "SAFETY":
+                            finish_reason_to_yield = "content_filter"
+
+                    if finish_reason_to_yield:
+                        usage_to_yield = {
+                            "prompt_tokens": accumulator.prompt_token_count,
+                            "completion_tokens": accumulator.candidates_token_count,
+                            "total_tokens": accumulator.total_token_count,
+                        }
+
+                    openai_chunk_dict = {
+                        "id": f"chatcmpl-{int(time.time())}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": accumulator.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta_to_yield,
+                                "finish_reason": finish_reason_to_yield,
+                            }
+                        ],
+                    }
+                    if usage_to_yield:
+                        openai_chunk_dict["usage"] = usage_to_yield
+
+                    openai_chunk_sse = (
+                        f"data: {json.dumps(openai_chunk_dict, ensure_ascii=False)}\n\n"
+                    )
+
+                    try:
+                        yield openai_chunk_sse
                     except GeneratorExit:
                         log(
                             "warning",
-                            "真流式：生成器在 yield 时退出 (可能由客户端断开引起)",
+                            "真流式: yield 块时客户端断开连接 (GeneratorExit)",
                             extra=log_extra,
                         )
-                        error_occurred = asyncio.CancelledError(
-                            "GeneratorExit during yield"
-                        )
-                        break
+                        raise
                     except Exception as e_yield_stream:
                         log(
                             "error",
-                            f"真流式：yield 流块时出错: {e_yield_stream}",
+                            f"真流式: yield 块时出错: {e_yield_stream}",
                             extra=log_extra,
                         )
-                        error_occurred = e_yield_stream
-                        break
-                log(
-                    "debug",
-                    f"真流式：完成迭代 API stream generator (共 {chunk_count} 块)",
-                    extra=log_extra,
-                )  # Existing LOG
+                        raise
 
-                # Check disconnect status one last time after loop
-                if not error_occurred and disconnect_monitor_task.done():
-                    client_disconnected_result = disconnect_monitor_task.result()
-                    if client_disconnected_result is True:
-                        log(
-                            "warning",
-                            "真流式：客户端在流结束后断开连接",
-                            extra=log_extra,
-                        )
-                        error_occurred = asyncio.CancelledError(
-                            "Client disconnected after stream"
-                        )
+                # --- 流结束处理 ---
+                log("info", "真流式: Vertex 流处理完成", extra=log_extra)
+                if accumulator.text or accumulator.function_call:
+                    final_response_obj = accumulator.create_final_response_obj()
+                    response_cache_manager.store(cache_key, final_response_obj)
+                    log("info", "真流式: 完整响应已缓存", extra=log_extra)
+                else:
+                    log("info", "真流式: 无有效内容生成，不缓存", extra=log_extra)
 
-                if not error_occurred:
-                    stream_successful = True
-                    log("info", "真流式：流传输成功完成", extra=log_extra)
-
-            except asyncio.CancelledError as ce:
-                log("warning", f"真流式：任务被取消: {ce}", extra=log_extra)
-                error_occurred = ce
-            except Exception as e_stream:
+            except asyncio.CancelledError as e:
+                log("warning", f"真流式: 处理被取消: {e}", extra=log_extra)
+                raise
+            except HTTPException as e:
                 log(
                     "error",
-                    f"真流式：处理流时发生错误: {e_stream}",
-                    exc_info=True,
+                    f"真流式: Vertex API 调用引发 HTTPException {e.status_code}: {e.detail}",
                     extra=log_extra,
                 )
-                error_occurred = e_stream
                 try:
-                    # Attempt to yield a final error chunk if possible
-                    yield openAI_stream_chunk(
+                    yield openAI_from_Gemini(
                         model=chat_request.model,
-                        content=f"错误：处理流时发生内部错误 ({type(e_stream).__name__})",
+                        content=f"错误: {e.detail}",
                         finish_reason="error",
+                        stream=True,
                     )
-                except:
-                    pass  # Ignore errors during final error yield
-
-            finally:
-                log("debug", "真流式：进入 finally 块", extra=log_extra)  # Existing LOG
-                # Cancel disconnect monitor if it's still running
-                if disconnect_monitor_task and not disconnect_monitor_task.done():
-                    log(
-                        "debug", "真流式：取消 disconnect_monitor_task", extra=log_extra
-                    )  # Existing LOG
-                    disconnect_monitor_task.cancel()
-
-                # 3e. Caching and Future Resolution on Success
-                # Ensure main_stream_future exists before using it
-                if main_stream_future:
-                    log(
-                        "debug",
-                        f"真流式：处理 Future, stream_successful={stream_successful}, error_occurred={error_occurred}",
-                        extra=log_extra,
-                    )  # Existing LOG
-                    if stream_successful and full_response_text:
-                        log(
-                            "info",
-                            f"真流式：成功完成，缓存完整响应 ({len(full_response_text)} chars)",
-                            extra=log_extra,
-                        )
-                        cached_response_obj = VertexCachedResponse(
-                            text=full_response_text,
-                            model=chat_request.model,
-                            total_token_count=total_tokens_from_stream,  # Use accumulated tokens if available
-                        )
-                        response_cache_manager.store(cache_key, cached_response_obj)
-                        log(
-                            "debug",
-                            f"真流式：尝试设置 Future 结果 (当前 done: {main_stream_future.done()})",
-                            extra=log_extra,
-                        )  # Existing LOG
-                        if not main_stream_future.done():
-                            try:
-                                main_stream_future.set_result(cached_response_obj)
-                                log(
-                                    "info",
-                                    "真流式：成功设置 Future 结果",
-                                    extra=log_extra,
-                                )  # Existing LOG
-                            except asyncio.InvalidStateError:
-                                log(
-                                    "warning",
-                                    "真流式：尝试设置 Future 结果时状态无效 (可能已被取消或已设置)",
-                                    extra=log_extra,
-                                )
-                        else:
-                            log(
-                                "warning",
-                                "真流式：Future 已完成，无法再次设置结果",
-                                extra=log_extra,
-                            )  # Existing LOG
-                        # Do NOT remove from active_requests_manager here, let it expire or be overwritten
-                    elif (
-                        we_created_the_future and not main_stream_future.done()
-                    ):  # Only modify future if we created it
-                        # Handle cases where stream finished but produced no text, or an error occurred
-                        if not error_occurred and not full_response_text:
-                            log(
-                                "warning",
-                                "真流式：流成功完成但未产生任何文本",
-                                extra=log_extra,
-                            )
-                            empty_response = VertexCachedResponse(
-                                text="", model=chat_request.model
-                            )
-                            try:
-                                main_stream_future.set_result(empty_response)
-                            except asyncio.InvalidStateError:
-                                log(
-                                    "warning",
-                                    "真流式：尝试设置空 Future 结果时状态无效",
-                                    extra=log_extra,
-                                )
-                        elif error_occurred:
-                            log(
-                                "warning",
-                                f"真流式：因错误未完成，设置 Future 异常: {type(error_occurred).__name__}",
-                                extra=log_extra,
-                            )
-                            try:
-                                main_stream_future.set_exception(error_occurred)
-                            except asyncio.InvalidStateError:
-                                log(
-                                    "warning",
-                                    "真流式：尝试设置 Future 异常时状态无效",
-                                    extra=log_extra,
-                                )
-                            # Clean up future immediately on error if we created it
-                            active_requests_manager.remove(orchestrator_pool_key)
-                        else:
-                            # Should not happen, but set a generic error if it does
-                            unknown_error = Exception("Unknown stream completion state")
-                            try:
-                                main_stream_future.set_exception(unknown_error)
-                            except asyncio.InvalidStateError:
-                                log(
-                                    "warning",
-                                    "真流式：尝试设置未知 Future 异常时状态无效",
-                                    extra=log_extra,
-                                )
-                            active_requests_manager.remove(
-                                orchestrator_pool_key
-                            )  # Clean up future
-                    elif not we_created_the_future:
-                        log(
-                            "debug",
-                            "真流式：非创建者，不修改 Future 状态",
-                            extra=log_extra,
-                        )  # Existing LOG
-                else:
+                except Exception as e_yield_err:
                     log(
                         "error",
-                        "真流式：在 finally 块中 main_stream_future 未定义 (仅在我们创建时应发生)",
+                        f"真流式: 发送 HTTPException 错误块时出错: {e_yield_err}",
                         extra=log_extra,
                     )
-                log("debug", "真流式：退出 finally 块", extra=log_extra)  # Existing LOG
+            except Exception as e:
+                log(
+                    "error",
+                    f"真流式: 处理 Vertex 流时发生错误: {e}",
+                    extra=log_extra,
+                    exc_info=True,
+                )
+                handle_gemini_error(e, "Vertex")
+                error_message = f"处理 Vertex 流时发生内部错误: {type(e).__name__}"
+                try:
+                    yield openAI_from_Gemini(
+                        model=chat_request.model,
+                        content=error_message,
+                        finish_reason="error",
+                        stream=True,
+                    )
+                except Exception as e_yield_err:
+                    log(
+                        "error",
+                        f"真流式: 发送通用 Exception 错误块时出错: {e_yield_err}",
+                        extra=log_extra,
+                    )
+            finally:
+                if disconnect_monitor_task and not disconnect_monitor_task.done():
+                    disconnect_monitor_task.cancel()
 
-            # No further yield needed here, generator finishes naturally or via error handling above
+        # --- 生成器结束 ---
+        log("debug", "流式响应生成器结束", extra=log_extra_base)
 
+    # 返回 StreamingResponse
     return StreamingResponse(
         stream_response_generator(), media_type="text/event-stream"
     )

@@ -2,79 +2,67 @@ import json
 import time
 
 
-def openAI_stream_chunk(
-    model="gemini", content=None, finish_reason=None, total_token_count=0
+def openAI_from_text(
+    model="gemini", content=None, finish_reason=None, total_token_count=0, stream=True
 ):
     """
-    创建 OpenAI 流式标准响应对象块 (SSE 格式)
+    根据传入参数，创建 OpenAI 标准响应对象块
     """
 
     now_time = int(time.time())
+    content_chunk = {}
     formatted_chunk = {
         "id": f"chatcmpl-{now_time}",
-        "object": "chat.completion.chunk",
         "created": now_time,
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": content},
-                "finish_reason": finish_reason,
-            }
-        ],
+        "choices": [{"index": 0, "finish_reason": finish_reason}],
     }
+
+    if content:
+        content_chunk = {"role": "assistant", "content": content}
 
     if finish_reason:
         formatted_chunk["usage"] = {"total_tokens": total_token_count}
 
-    return f"data: {json.dumps(formatted_chunk, ensure_ascii=False)}\n\n"
-
-
-# 已废弃，将在后续版本中删除
-def openAI_nonstream_response(response):
-    """
-    使用 gemini 非流式响应对象(提取后),
-    创建 OpenAI 非流式标准响应对象
-    """
-    return {
-        "id": f"chatcmpl-{int(time.time() * 1000)}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": response.model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": response.text},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": response.prompt_token_count,
-            "completion_tokens": response.candidates_token_count,
-            "total_tokens": response.total_token_count,
-        },
-    }
+    if stream:
+        formatted_chunk["choices"][0]["delta"] = content_chunk
+        formatted_chunk["object"] = "chat.completion.chunk"
+        return f"data: {json.dumps(formatted_chunk, ensure_ascii=False)}\n\n"
+    else:
+        formatted_chunk["choices"][0]["message"] = content_chunk
+        formatted_chunk["object"] = "chat.completion"
+        return formatted_chunk
 
 
 def openAI_from_Gemini(response, stream=True):
     """
-    根据 GeminiResponseWrapper 对象创建 OpenAI 流式标准响应对象块 (SSE 格式)。
+    根据 GeminiResponseWrapper 对象创建 OpenAI 标准响应对象块。
 
     Args:
         response: GeminiResponseWrapper 对象，包含响应数据。
 
     Returns:
-        格式化后的 SSE 字符串 ("data: {...}\n\n")。
+        OpenAI 标准响应
     """
     now_time = int(time.time())
     chunk_id = f"chatcmpl-{now_time}"  # 使用时间戳生成唯一 ID
-
+    content_chunk = {}
     formatted_chunk = {
         "id": chunk_id,
-        "object": "chat.completion.chunk",
         "created": now_time,
         "model": response.model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": response.finish_reason}],
+        "choices": [{"index": 0, "finish_reason": response.finish_reason}],
+    }
+
+    # 准备 usage 数据，使用 getattr 获取并提供默认值 0 ( API 返回 None 时使用)
+    prompt_tokens = getattr(response, "prompt_token_count", 0)
+    candidates_tokens = getattr(response, "candidates_token_count", 0)
+    total_tokens = getattr(response, "total_token_count", 0)
+
+    usage_data = {
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(candidates_tokens),
+        "total_tokens": int(total_tokens),
     }
 
     if response.function_call:
@@ -97,33 +85,28 @@ def openAI_from_Gemini(response, stream=True):
                 }
             )
 
-        formatted_chunk["choices"][0]["delta"] = {
+        content_chunk = {
             "role": "assistant",
             "content": None,  # 函数调用时 content 为 null
             "tool_calls": tool_calls,
         }
     elif response.text:
         # 处理普通文本响应
-        formatted_chunk["choices"][0]["delta"] = {
-            "role": "assistant",
-            "content": response.text,
-        }
-
-    if response.finish_reason == "STOP":
-        formatted_chunk["usage"] = {
-            "prompt_tokens": response.prompt_token_count,
-            "completion_tokens": response.candidates_token_count,
-            "total_tokens": response.total_token_count,
-        }
+        content_chunk = {"role": "assistant", "content": response.text}
 
     if stream:
-        # 返回 SSE 格式的流式块
+        formatted_chunk["choices"][0]["delta"] = content_chunk
+        formatted_chunk["object"] = "chat.completion.chunk"
+        # 仅在流结束时添加 usage 字段
+        if response.finish_reason:
+            formatted_chunk["usage"] = usage_data
+    else:
+        formatted_chunk["choices"][0]["message"] = content_chunk
+        formatted_chunk["object"] = "chat.completion"
+        # 非流式响应总是包含 usage 字段，以满足 response_model 验证
+        formatted_chunk["usage"] = usage_data
+
+    if stream:
         return f"data: {json.dumps(formatted_chunk, ensure_ascii=False)}\n\n"
     else:
-        # 构建非流式响应
-        formatted_chunk["object"] = "chat.completion"
-        # 将 'delta' 键重命名为 'message'
-        formatted_chunk["choices"][0]["message"] = formatted_chunk["choices"][0].pop(
-            "delta"
-        )
         return formatted_chunk
