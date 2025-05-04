@@ -1,4 +1,4 @@
-name: Docker Image CI for GHCR
+name: Docker Image Build CI for GHCR
 
 on:  
   push:
