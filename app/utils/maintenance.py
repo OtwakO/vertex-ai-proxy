@@ -1,13 +1,14 @@
+import copy  # 添加copy模块导入
 import sys
+from zoneinfo import ZoneInfo
 
 # from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # 替换为异步调度器
+
+from app.config import persistence, settings
+from app.utils import check_version
 from app.utils.logging import log
 from app.utils.stats import clean_expired_stats
-from app.utils import check_version
-from zoneinfo import ZoneInfo
-from app.config import settings, persistence
-import copy  # 添加copy模块导入
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):

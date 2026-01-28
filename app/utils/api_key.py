@@ -1,10 +1,12 @@
+import logging
+import os
 import random
 import re
-import os
-import logging
+
 from apscheduler.schedulers.background import BackgroundScheduler
-from app.utils.logging import format_log_message
+
 import app.config.settings as settings
+from app.utils.logging import format_log_message
 
 logger = logging.getLogger("my_logger")
 

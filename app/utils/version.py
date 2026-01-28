@@ -1,6 +1,7 @@
 import requests
-from app.utils.logging import log
+
 import app.config.settings as settings
+from app.utils.logging import log
 
 
 async def check_version():

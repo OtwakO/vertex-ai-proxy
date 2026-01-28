@@ -1,8 +1,10 @@
-import requests
-import httpx  # 添加 httpx 导入
-import logging
 import asyncio
+import logging
+
+import httpx  # 添加 httpx 导入
+import requests
 from fastapi import HTTPException
+
 from app.utils.logging import log
 
 logger = logging.getLogger("my_logger")

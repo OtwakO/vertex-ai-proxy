@@ -1,40 +1,37 @@
-from dotenv import load_dotenv
-
-load_dotenv()
+import asyncio
+import os
+import pathlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+import app.config.settings as settings
+from app.api import dashboard_router, init_dashboard_router, init_router, router
+from app.config.persistence import load_settings, save_settings
+from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 from app.models import ErrorResponse
 from app.services import GeminiClient
 from app.utils import (
-    APIKeyManager,
-    test_api_key,
-    ResponseCacheManager,
     ActiveRequestsManager,
+    APIKeyManager,
+    ResponseCacheManager,
     check_version,
-    schedule_cache_cleanup,
     handle_exception,
     log,
+    schedule_cache_cleanup,
+    test_api_key,
 )
-from app.config.persistence import save_settings, load_settings
-from app.api import router, init_router, dashboard_router, init_dashboard_router
 from app.vertex.vertex import init_vertex_ai
-import app.config.settings as settings
-from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
-import asyncio
-import sys
-import pathlib
-import threading
-from concurrent.futures import ThreadPoolExecutor
-import os
 
 # 设置模板目录
 BASE_DIR = pathlib.Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-app = FastAPI(limit="50M")
 
 # --------------- 全局实例 ---------------
 load_settings()
@@ -167,8 +164,8 @@ sys.excepthook = handle_exception
 # --------------- 事件处理 ---------------
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     log("info", "Starting Gemini API proxy...")
     await check_version()
     init_vertex_ai()
@@ -336,6 +333,11 @@ async def startup_event():
 
     # 初始化仪表盘路由器
     init_dashboard_router(key_manager, response_cache_manager, active_requests_manager)
+
+    yield
+
+
+app = FastAPI(limit="50M", lifespan=lifespan)
 
 
 # --------------- 异常处理 ---------------

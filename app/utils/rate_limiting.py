@@ -1,5 +1,6 @@
-import time
 import asyncio
+import time
+
 from fastapi import HTTPException, Request
 
 rate_limit_data = {}

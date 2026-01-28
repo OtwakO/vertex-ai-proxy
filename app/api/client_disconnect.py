@@ -1,10 +1,11 @@
 import asyncio
-from fastapi import Request, HTTPException
+
+from fastapi import HTTPException, Request
+
+import app.config.settings as settings
 from app.models import ChatCompletionRequest
 from app.utils import update_api_call_stats
-
 from app.utils.logging import log
-import app.config.settings as settings
 
 
 # 客户端断开检测函数

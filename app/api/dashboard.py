@@ -1,14 +1,16 @@
-from fastapi import APIRouter, HTTPException
-from datetime import datetime, timedelta
 import asyncio
 import threading
-from app.utils import log_manager, clean_expired_stats
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, HTTPException
+
 import app.config.settings as settings
-from app.services import GeminiClient
-from app.utils.auth import verify_web_password
-from app.utils.maintenance import api_call_stats_clean
-from app.utils.logging import log, vertex_log_manager
 from app.config.persistence import save_settings
+from app.services import GeminiClient
+from app.utils import clean_expired_stats, log_manager
+from app.utils.auth import verify_web_password
+from app.utils.logging import log, vertex_log_manager
+from app.utils.maintenance import api_call_stats_clean
 
 # 创建路由器
 dashboard_router = APIRouter(prefix="/api", tags=["dashboard"])

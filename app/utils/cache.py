@@ -1,8 +1,10 @@
-import time
-import xxhash
-from typing import Dict, Any, Optional, Tuple
 import logging
+import time
 from collections import deque
+from typing import Any, Dict, Optional, Tuple
+
+import xxhash
+
 from app.utils.logging import log
 
 logger = logging.getLogger("my_logger")

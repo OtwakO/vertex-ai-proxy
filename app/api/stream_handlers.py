@@ -1,11 +1,13 @@
 import asyncio
+
 from fastapi.responses import StreamingResponse
+
+import app.config.settings as settings
 from app.models import ChatCompletionRequest
 from app.services import GeminiClient
-from app.utils import handle_gemini_error, update_api_call_stats, log, openAI_from_text
+from app.utils import handle_gemini_error, log, openAI_from_text, update_api_call_stats
 from app.utils.response import openAI_from_Gemini
 from app.utils.stats import get_api_key_usage
-import app.config.settings as settings
 
 
 async def stream_response_generator(

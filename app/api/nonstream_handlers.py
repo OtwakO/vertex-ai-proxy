@@ -1,10 +1,11 @@
 import asyncio
+
+import app.config.settings as settings
 from app.models import ChatCompletionRequest
 from app.services import GeminiClient
 from app.utils import update_api_call_stats
 from app.utils.error_handling import handle_gemini_error
 from app.utils.logging import log
-import app.config.settings as settings
 from app.utils.response import openAI_from_Gemini, openAI_from_text
 from app.utils.stats import get_api_key_usage
 

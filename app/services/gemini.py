@@ -1,13 +1,14 @@
 import json
 import os
-import httpx  # 添加 httpx 导入
-from app.models import ChatCompletionRequest
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
 import secrets
 import string
-import app.config.settings as settings
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
+import httpx  # 添加 httpx 导入
+
+import app.config.settings as settings
+from app.models import ChatCompletionRequest
 from app.utils.logging import log
 
 

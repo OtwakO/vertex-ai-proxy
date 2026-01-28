@@ -1,6 +1,7 @@
 from datetime import datetime
-from app.utils.logging import log
+
 from app.config.settings import stats_lock
+from app.utils.logging import log
 
 
 def clean_expired_stats(api_call_stats):

@@ -1,13 +1,14 @@
 import json
 import os
-from app.models import ChatCompletionRequest
-from dataclasses import dataclass
-from typing import Optional
-import httpx
 import secrets
 import string
-import app.config.settings as settings
+from dataclasses import dataclass
+from typing import Optional
 
+import httpx
+
+import app.config.settings as settings
+from app.models import ChatCompletionRequest
 from app.utils.logging import log
 
 
